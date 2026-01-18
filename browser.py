@@ -648,7 +648,7 @@ def fill_profile_info(driver):
         return False
 
 
-def handle_stripe_input(driver, field_name, input_selectors, value):
+def handle_stripe_input(driver, field_name, input_selectors, value, timeout=20):
     """
     智能填写 Stripe 字段
     逻辑：先在主文档找 -> 找不到则递归遍历所有 iframe 找
@@ -657,17 +657,26 @@ def handle_stripe_input(driver, field_name, input_selectors, value):
     
     # 辅助函数：在当前上下文尝试查找并输入
     def try_fill():
+        wait = WebDriverWait(driver, timeout)
         for selector in selectors:
             try:
-                el = driver.find_element(By.CSS_SELECTOR, selector)
-                if el.is_displayed():
-                    # 滚动到可见
-                    try:
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-                    except:
-                        pass
-                    type_slowly(el, value)
-                    return True
+                el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                if not el.is_displayed():
+                    continue
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                except Exception:
+                    pass
+                try:
+                    el.click()
+                except Exception:
+                    pass
+                try:
+                    el.clear()
+                except Exception:
+                    pass
+                type_slowly(el, value)
+                return True
             except:
                 continue
         return False
@@ -677,8 +686,8 @@ def handle_stripe_input(driver, field_name, input_selectors, value):
         print(f"  ✅ 在主文档找到 {field_name}")
         return True
         
-    # 2. 递归遍历 iframe (支持 2 层嵌套)
-    def traverse_frames(driver, depth=0, max_depth=2):
+    # 2. 递归遍历 iframe (支持多层嵌套，Stripe 支付元素通常 2-3 层)
+    def traverse_frames(driver, depth=0, max_depth=6):
         if depth >= max_depth:
             return False
             
@@ -882,29 +891,40 @@ def subscribe_plus_trial(driver):
             return None
 
         # 辅助函数：遍历查找并执行操作
-        def run_in_all_frames(action_name, action_func):
-            # 1. 主文档
-            if action_func():
-                print(f"  ✅ {action_name} (主文档)")
-                return True
-            
-            # 2. 遍历 iframe
-            driver.switch_to.default_content()
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            for i, frame in enumerate(iframes):
+        def run_in_all_frames(action_name, action_func, max_depth=6):
+            """在所有 iframe（含嵌套）中尝试执行 action_func"""
+            visited = 0
+            found = False
+
+            def _traverse(depth=0):
+                nonlocal visited, found
+                if depth > max_depth or found:
+                    return
                 try:
-                    driver.switch_to.frame(frame)
                     if action_func():
-                        print(f"  ✅ {action_name} (iframe[{i}])")
-                        driver.switch_to.default_content()
-                        return True
-                    driver.switch_to.default_content()
-                except:
-                    try: driver.switch_to.default_content()
-                    except: pass
-            
-            print(f"  ⚠️ 未能完成: {action_name}")
-            return False
+                        found = True
+                        print(f"  ✅ {action_name} (depth={depth})")
+                        return
+                except Exception:
+                    pass
+                frames = driver.find_elements(By.TAG_NAME, "iframe")
+                for idx, f in enumerate(frames):
+                    try:
+                        visited += 1
+                        driver.switch_to.frame(f)
+                        _traverse(depth + 1)
+                        driver.switch_to.parent_frame()
+                        if found:
+                            return
+                    except Exception:
+                        try: driver.switch_to.parent_frame()
+                        except: pass
+
+            driver.switch_to.default_content()
+            _traverse(0)
+            if not found:
+                print(f"  ⚠️ 未能完成: {action_name} (visited iframes={visited})")
+            return found
 
         # ============== 1. 自动检测当前国家 ==============
         current_country_code = "JP" # 默认兜底
@@ -978,20 +998,36 @@ def subscribe_plus_trial(driver):
             selectors = [
                  # Stripe 常见 ID
                  '#Field-nameInput', '#Field-billingNameInput', '#billingName',
-                 'input[id^="Field-nameInput"]',
+                 'input[id^="Field-nameInput"]', 'input[id*="billingName"]',
+                 'input[data-elements-stable-field-name="name"]',
+                 'input[data-elements-stable-field-name="billingName"]',
                  # 通用属性
                  'input[name="name"]', 'input[name="billingName"]', 
                  'input[id="billingName"]', 
                  # 中文和英文 Placeholder
-                 'input[placeholder="全名"]', 'input[placeholder="Full name"]',
+                 'input[placeholder*="全名"]', 'input[placeholder*="姓名"]',
+                 'input[placeholder*="Full name"]', 'input[placeholder*="Name on card"]',
+                 'input[aria-label*="姓名"]', 'input[aria-label*="name"]',
                  'input[autocomplete="name"]', 'input[autocomplete="cc-name"]'
             ]
+            wait = WebDriverWait(driver, 10)
             for s in selectors:
-                el = find_visible(s)
-                if el:
-                    el.clear()
+                try:
+                    el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, s)))
+                    if not el.is_displayed():
+                        continue
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                    except Exception:
+                        pass
+                    try: el.click()
+                    except Exception: pass
+                    try: el.clear()
+                    except Exception: pass
                     type_slowly(el, billing_info["name"])
                     return True
+                except Exception:
+                    continue
             return False
             
         print(f"👤 寻找并填写姓名: {billing_info['name']}...")
@@ -1060,23 +1096,38 @@ def subscribe_plus_trial(driver):
         # ============== 4. 填写信用卡 ==============
         print("💳 正在填写信用卡信息...")
         card = CREDIT_CARD_INFO
+        # 确保回到主文档，再去遍历 Stripe 的多层 iframe
+        try: driver.switch_to.default_content()
+        except: pass
         
         # 卡号
-        if not handle_stripe_input(driver, '卡号', 'input[name="cardnumber"], input[placeholder*="Card number"], input[placeholder*="0000"], input[autocomplete="cc-number"]', card["number"]):
+        if not handle_stripe_input(
+            driver,
+            '卡号',
+            'input[name="cardnumber"], input[name="number"], input[id="Field-numberInput"], '
+            'input[data-elements-stable-field-name="cardNumber"], '
+            'input[placeholder*="Card number"], input[placeholder*="0000"], input[placeholder*="卡号"], '
+            'input[placeholder*="1234 1234 1234"], input[aria-label*="卡号"], input[autocomplete="cc-number"]',
+            card["number"]
+        ):
              print("❌ 卡号输入失败")
         
         time.sleep(1)
         
         # 有效期
         if not handle_stripe_input(driver, '有效期', 
-            'input[name="exp-date"], input[name="expirationDate"], input[id="cardExpiry"], input[placeholder="MM / YY"], input[autocomplete="cc-exp"]', 
+            'input[name="exp-date"], input[name="expirationDate"], input[name="expiry"], '
+            'input[id="cardExpiry"], input[id="Field-expiryInput"], '
+            'input[data-elements-stable-field-name="cardExpiry"], '
+            'input[placeholder="MM / YY"], input[placeholder*="月/年"], '
+            'input[placeholder*="有效期"], input[aria-label*="有效期"], input[autocomplete="cc-exp"]', 
             card["expiry"]):
             print("❌ 有效期输入失败")
             
         time.sleep(1)
         
         # CVC
-        if not handle_stripe_input(driver, 'CVC', 'input[name="cvc"], input[name="securityCode"], input[id="cardCvc"], input[placeholder="CVC"]', card["cvc"]):
+        if not handle_stripe_input(driver, 'CVC', 'input[name="cvc"], input[name="securityCode"], input[id="cardCvc"], input[id="Field-cvcInput"], input[data-elements-stable-field-name="cardCvc"], input[placeholder="CVC"], input[placeholder*="安全码"], input[aria-label*="安全码"]', card["cvc"]):
              print("❌ CVC 输入失败")
 
         time.sleep(2)

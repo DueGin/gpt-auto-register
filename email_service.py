@@ -9,6 +9,9 @@ import string
 import time
 import email
 from email import policy
+from email.header import decode_header
+import imaplib
+import poplib
 
 from config import (
     EMAIL_WORKER_URL,
@@ -16,7 +19,16 @@ from config import (
     EMAIL_PREFIX_LENGTH,
     EMAIL_WAIT_TIMEOUT,
     EMAIL_POLL_INTERVAL,
-    HTTP_TIMEOUT
+    HTTP_TIMEOUT,
+    QQ_EMAIL_ENABLED,
+    QQ_EMAIL_ADDRESS,
+    QQ_EMAIL_AUTH_CODE,
+    QQ_EMAIL_PROTOCOL,
+    QQ_IMAP_HOST,
+    QQ_IMAP_PORT,
+    QQ_POP_HOST,
+    QQ_POP_PORT,
+    QQ_MAILBOX
 )
 from utils import http_session, get_user_agent, extract_verification_code
 
@@ -39,6 +51,13 @@ def create_temp_email():
         string.ascii_lowercase + string.digits, 
         k=EMAIL_PREFIX_LENGTH
     ))
+
+    # 当未配置 Worker 时，直接使用自有域名生成邮箱地址（依赖域名的 catch-all/转发）
+    worker_url = (EMAIL_WORKER_URL or "").strip()
+    if (not worker_url) or ("your-worker-name" in worker_url) or ("your-subdomain" in worker_url):
+        fallback_email = f"{prefix}@{EMAIL_DOMAIN}"
+        print(f"✅ 未配置 Worker，使用本地域名生成邮箱: {fallback_email}")
+        return fallback_email, None
     
     headers = {
         "Content-Type": "application/json",
@@ -192,13 +211,191 @@ def parse_raw_email(raw_content: str):
     return result
 
 
-def wait_for_verification_email(jwt_token: str, timeout: int = None):
+def _decode_mime_header(value: str) -> str:
+    """解码 MIME 编码的邮件头"""
+    if not value:
+        return ""
+    
+    decoded_parts = []
+    for part, encoding in decode_header(value):
+        if isinstance(part, bytes):
+            try:
+                decoded_parts.append(part.decode(encoding or "utf-8", errors="ignore"))
+            except Exception:
+                decoded_parts.append(part.decode("utf-8", errors="ignore"))
+        else:
+            decoded_parts.append(part)
+    return "".join(decoded_parts)
+
+
+def _parse_email_bytes(raw_bytes: bytes):
+    """
+    从原始字节解析邮件（IMAP/POP 使用）
+    
+    返回:
+        dict: 包含 subject, body, sender 的字典
+    """
+    if not raw_bytes:
+        return {'subject': '', 'body': '', 'sender': ''}
+    
+    try:
+        msg = email.message_from_bytes(raw_bytes, policy=policy.default)
+        
+        subject = _decode_mime_header(msg.get('Subject', ''))
+        sender = _decode_mime_header(msg.get('From', ''))
+        body = ''
+        
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                if content_type in ['text/plain', 'text/html']:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        charset = part.get_content_charset() or 'utf-8'
+                        try:
+                            body = payload.decode(charset, errors='ignore')
+                        except Exception:
+                            body = payload.decode('utf-8', errors='ignore')
+                        if body:
+                            break
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                charset = msg.get_content_charset() or 'utf-8'
+                try:
+                    body = payload.decode(charset, errors='ignore')
+                except Exception:
+                    body = payload.decode('utf-8', errors='ignore')
+        
+        return {'subject': subject, 'body': body, 'sender': sender}
+    except Exception as e:
+        print(f"  解析邮件错误: {e}")
+        return {'subject': '', 'body': '', 'sender': ''}
+
+
+def _extract_code_from_raw_email(raw_bytes: bytes):
+    """从原始邮件字节中提取验证码（针对 QQ 邮箱读取）"""
+    parsed = _parse_email_bytes(raw_bytes)
+    subject = parsed['subject']
+    sender = parsed['sender']
+    body = parsed['body']
+    
+    subject_lower = subject.lower()
+    sender_lower = sender.lower()
+    is_openai_mail = ('openai' in sender_lower) or ('chatgpt' in subject_lower)
+    if not is_openai_mail:
+        return None
+    
+    code = extract_verification_code(subject)
+    if code:
+        return code
+    
+    if body:
+        return extract_verification_code(body)
+    
+    return None
+
+
+def _fetch_code_via_imap(max_messages: int = 15):
+    """通过 IMAP 轮询 QQ 邮箱"""
+    client = None
+    try:
+        client = imaplib.IMAP4_SSL(QQ_IMAP_HOST, QQ_IMAP_PORT)
+        client.login(QQ_EMAIL_ADDRESS, QQ_EMAIL_AUTH_CODE)
+        client.select(QQ_MAILBOX)
+        
+        status, data = client.search(None, "ALL")
+        if status != 'OK' or not data or not data[0]:
+            return None
+        
+        ids = data[0].split()
+        for msg_id in reversed(ids[-max_messages:]):
+            status, msg_data = client.fetch(msg_id, "(RFC822)")
+            if status != 'OK':
+                continue
+            for part in msg_data:
+                if isinstance(part, tuple):
+                    code = _extract_code_from_raw_email(part[1])
+                    if code:
+                        return code
+    except Exception as e:
+        print(f"  QQ IMAP 读取错误: {e}")
+    finally:
+        if client:
+            try:
+                client.logout()
+            except Exception:
+                pass
+    return None
+
+
+def _fetch_code_via_pop(max_messages: int = 10):
+    """通过 POP 轮询 QQ 邮箱"""
+    client = None
+    try:
+        client = poplib.POP3_SSL(QQ_POP_HOST, QQ_POP_PORT, timeout=HTTP_TIMEOUT)
+        client.user(QQ_EMAIL_ADDRESS)
+        client.pass_(QQ_EMAIL_AUTH_CODE)
+        
+        total_messages = len(client.list()[1])
+        if total_messages == 0:
+            return None
+        
+        start = max(1, total_messages - max_messages + 1)
+        for i in range(total_messages, start - 1, -1):
+            _, lines, _ = client.retr(i)
+            raw_email = b"\r\n".join(lines)
+            code = _extract_code_from_raw_email(raw_email)
+            if code:
+                return code
+    except Exception as e:
+        print(f"  QQ POP 读取错误: {e}")
+    finally:
+        if client:
+            try:
+                client.quit()
+            except Exception:
+                pass
+    return None
+
+
+def wait_for_verification_email_via_qq(timeout: int = None):
+    """
+    使用 QQ 邮箱轮询验证码（适用于 Cloudflare 路由到 QQ 的场景）
+    
+    返回:
+        str: 验证码，未找到返回 None
+    """
+    if timeout is None:
+        timeout = EMAIL_WAIT_TIMEOUT
+    
+    print(f"⏳ 正在从 QQ 邮箱等待验证邮件（最长 {timeout} 秒）...")
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        if QQ_EMAIL_PROTOCOL.startswith('pop'):
+            code = _fetch_code_via_pop()
+        else:
+            code = _fetch_code_via_imap()
+        
+        if code:
+            return code
+        
+        elapsed = int(time.time() - start_time)
+        print(f"  QQ 邮箱轮询中... ({elapsed}秒)", end='\r')
+        time.sleep(EMAIL_POLL_INTERVAL)
+    
+    print("\n⏰ QQ 邮箱未收到验证码")
+    return None
+
+
+def wait_for_verification_email(jwt_token: str = None, timeout: int = None):
     """
     等待并提取 OpenAI 验证码
     会持续轮询邮箱直到收到验证邮件或超时
     
     参数:
-        jwt_token: JWT 令牌
+        jwt_token: JWT 令牌（使用 Cloudflare 临时邮箱时需要）
         timeout: 超时时间（秒），默认使用配置文件中的值
     
     返回:
@@ -206,6 +403,17 @@ def wait_for_verification_email(jwt_token: str, timeout: int = None):
     """
     if timeout is None:
         timeout = EMAIL_WAIT_TIMEOUT
+    
+    # 优先使用 QQ 邮箱轮询（Cloudflare 路由到 QQ 的场景）
+    if QQ_EMAIL_ENABLED and QQ_EMAIL_ADDRESS and QQ_EMAIL_AUTH_CODE:
+        code = wait_for_verification_email_via_qq(timeout)
+        if code or not jwt_token:
+            return code
+        print("⚠️ QQ 邮箱未获取到验证码，尝试使用 Cloudflare 临时邮箱...")
+    
+    if not jwt_token:
+        print("⚠️ 未提供 JWT 令牌，无法调用 Cloudflare 临时邮箱接口")
+        return None
     
     print(f"⏳ 正在等待验证邮件（最长 {timeout} 秒）...")
     start_time = time.time()

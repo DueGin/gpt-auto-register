@@ -24,7 +24,8 @@ from config import (
     HTTP_TIMEOUT,
     USER_AGENT,
     MIN_AGE,
-    MAX_AGE
+    MAX_AGE,
+    BILLING_INFO
 )
 
 # 尝试导入 Faker 库
@@ -175,7 +176,12 @@ def save_to_txt(email: str, password: str = None, status="已注册"):
     except Exception as e:
         print(f"❌ 保存/更新账号信息失败: {e}")
 
-def update_account_status(email: str, new_status: str, password: str = None):
+def update_account_status(
+    email: str,
+    new_status: str,
+    password: str = None,
+    record_id: str | None = None,
+):
     """
     专门用于更新账号状态的快捷函数
     
@@ -185,6 +191,12 @@ def update_account_status(email: str, new_status: str, password: str = None):
         password: 如果需要更新密码，则传入新密码，否则为 None
     """
     save_to_txt(email, password, new_status)
+    if new_status == "已开通Plus":
+        try:
+            from feishu_bitable import update_plus_redeemed_time_in_bitable
+            update_plus_redeemed_time_in_bitable(email=email, record_id=record_id)
+        except Exception:
+            pass
 
 
 def extract_verification_code(content: str):
@@ -434,6 +446,25 @@ def generate_billing_info(country="JP"):
     返回:
         dict: 包含姓名和地址的完整账单信息
     """
+    # 优先使用配置中的静态账单信息
+    billing_cfg = BILLING_INFO
+    if billing_cfg.get("use_static") or billing_cfg.get("address1") or billing_cfg.get("city") or billing_cfg.get("state") or billing_cfg.get("zip"):
+        country_code = (billing_cfg.get("country") or country).upper()
+        name = billing_cfg.get("name") or generate_random_name()
+        billing_info = {
+            "name": name,
+            "zip": billing_cfg.get("zip", ""),
+            "state": billing_cfg.get("state", ""),
+            "city": billing_cfg.get("city", ""),
+            "address1": billing_cfg.get("address1", ""),
+            "address2": billing_cfg.get("address2", ""),
+            "country": country_code
+        }
+        print("📋 使用配置中的账单信息:")
+        print(f"   姓名: {billing_info['name']}")
+        print(f"   地址: {billing_info['address1']}, {billing_info['city']}, {billing_info['state']} {billing_info['zip']}")
+        return billing_info
+
     # 生成姓名
     name = generate_random_name()
     
@@ -458,5 +489,3 @@ def generate_billing_info(country="JP"):
     print(f"   州/省: {billing_info['state']}, 邮编: {billing_info['zip']}")
     
     return billing_info
-
-

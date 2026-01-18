@@ -52,6 +52,20 @@ class EmailConfig:
 
 
 @dataclass
+class QQEmailConfig:
+    """QQ 邮箱读取配置"""
+    enabled: bool = False
+    address: str = ""
+    auth_code: str = ""
+    protocol: str = "imap"   # imap 或 pop
+    imap_host: str = "imap.qq.com"
+    imap_port: int = 993
+    pop_host: str = "pop.qq.com"
+    pop_port: int = 995
+    mailbox: str = "INBOX"
+
+
+@dataclass
 class BrowserConfig:
     """浏览器配置"""
     max_wait_time: int = 600
@@ -99,9 +113,49 @@ class CreditCardConfig:
 
 
 @dataclass
+class BillingInfoConfig:
+    """账单地址配置"""
+    use_static: bool = False
+    name: str = ""
+    country: str = ""
+    state: str = ""
+    city: str = ""
+    address1: str = ""
+    address2: str = ""
+    zip: str = ""
+
+
+@dataclass
 class PaymentConfig:
     """支付配置"""
     credit_card: CreditCardConfig = field(default_factory=CreditCardConfig)
+    billing: BillingInfoConfig = field(default_factory=BillingInfoConfig)
+
+
+@dataclass
+class FeishuBitableFieldsConfig:
+    """飞书多维表格字段映射（字段名需与表格中一致）"""
+    email: str = "邮箱"
+    password: str = "密码"
+    registered_at: str = "注册时间"
+    plus_redeemed_at: str = "兑换Plus时间"
+    account_type: str = "类型"
+    # 兼容旧字段（可留空）
+    status: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class FeishuBitableConfig:
+    """飞书多维表格配置"""
+    enabled: bool = False
+    api_base_url: str = "https://open.feishu.cn/open-apis"
+    app_id: str = ""
+    app_secret: str = ""
+    app_token: str = ""
+    table_id: str = ""
+    created_at_format: str = "datetime_str"  # datetime_str 或 timestamp_ms
+    fields: FeishuBitableFieldsConfig = field(default_factory=FeishuBitableFieldsConfig)
 
 
 @dataclass
@@ -109,12 +163,14 @@ class AppConfig:
     """应用程序完整配置"""
     registration: RegistrationConfig = field(default_factory=RegistrationConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    qq_email: QQEmailConfig = field(default_factory=QQEmailConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     password: PasswordConfig = field(default_factory=PasswordConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     payment: PaymentConfig = field(default_factory=PaymentConfig)
+    feishu_bitable: FeishuBitableConfig = field(default_factory=FeishuBitableConfig)
 
 
 # ==============================================================
@@ -212,6 +268,21 @@ class ConfigLoader:
                 poll_interval=email.get('poll_interval', 3),
                 admin_password=email.get('admin_password', '')
             )
+
+        # QQ 邮箱配置
+        if 'qq_email' in self.raw_config:
+            qq_email = self.raw_config['qq_email']
+            self.config.qq_email = QQEmailConfig(
+                enabled=qq_email.get('enabled', False),
+                address=qq_email.get('address', ''),
+                auth_code=qq_email.get('auth_code', ''),
+                protocol=qq_email.get('protocol', 'imap'),
+                imap_host=qq_email.get('imap_host', 'imap.qq.com'),
+                imap_port=qq_email.get('imap_port', 993),
+                pop_host=qq_email.get('pop_host', 'pop.qq.com'),
+                pop_port=qq_email.get('pop_port', 995),
+                mailbox=qq_email.get('mailbox', 'INBOX')
+            )
         
         # 浏览器配置
         if 'browser' in self.raw_config:
@@ -265,7 +336,40 @@ class ConfigLoader:
                     expiry_month=payment.get('credit_card', {}).get('expiry_month', ''),
                     expiry_year=payment.get('credit_card', {}).get('expiry_year', ''),
                     cvc=payment.get('credit_card', {}).get('cvc', '')
+                ),
+                billing=BillingInfoConfig(
+                    use_static=payment.get('billing', {}).get('use_static', False),
+                    name=payment.get('billing', {}).get('name', ''),
+                    country=payment.get('billing', {}).get('country', ''),
+                    state=payment.get('billing', {}).get('state', ''),
+                    city=payment.get('billing', {}).get('city', ''),
+                    address1=payment.get('billing', {}).get('address1', ''),
+                    address2=payment.get('billing', {}).get('address2', ''),
+                    zip=payment.get('billing', {}).get('zip', '')
                 )
+            )
+
+        # 飞书多维表格配置
+        if 'feishu_bitable' in self.raw_config:
+            fb = self.raw_config.get('feishu_bitable') or {}
+            fb_fields = fb.get('fields', {}) or {}
+            self.config.feishu_bitable = FeishuBitableConfig(
+                enabled=fb.get('enabled', False),
+                api_base_url=fb.get('api_base_url', 'https://open.feishu.cn/open-apis'),
+                app_id=fb.get('app_id', ''),
+                app_secret=fb.get('app_secret', ''),
+                app_token=fb.get('app_token', ''),
+                table_id=fb.get('table_id', ''),
+                created_at_format=fb.get('created_at_format', 'datetime_str'),
+                fields=FeishuBitableFieldsConfig(
+                    email=fb_fields.get('email', '邮箱'),
+                    password=fb_fields.get('password', '密码'),
+                    registered_at=fb_fields.get('registered_at', fb_fields.get('created_at', '注册时间')),
+                    plus_redeemed_at=fb_fields.get('plus_redeemed_at', '兑换Plus时间'),
+                    account_type=fb_fields.get('account_type', '类型'),
+                    status=fb_fields.get('status', ''),
+                    created_at=fb_fields.get('created_at', ''),
+                ),
             )
     
     def reload(self) -> None:
@@ -323,6 +427,17 @@ EMAIL_WAIT_TIMEOUT = cfg.email.wait_timeout
 EMAIL_POLL_INTERVAL = cfg.email.poll_interval
 EMAIL_ADMIN_PASSWORD = cfg.email.admin_password
 
+# QQ 邮箱配置
+QQ_EMAIL_ENABLED = cfg.qq_email.enabled
+QQ_EMAIL_ADDRESS = cfg.qq_email.address
+QQ_EMAIL_AUTH_CODE = cfg.qq_email.auth_code
+QQ_EMAIL_PROTOCOL = (cfg.qq_email.protocol or "imap").lower()
+QQ_IMAP_HOST = cfg.qq_email.imap_host
+QQ_IMAP_PORT = cfg.qq_email.imap_port
+QQ_POP_HOST = cfg.qq_email.pop_host
+QQ_POP_PORT = cfg.qq_email.pop_port
+QQ_MAILBOX = cfg.qq_email.mailbox
+
 # 浏览器配置
 MAX_WAIT_TIME = cfg.browser.max_wait_time
 SHORT_WAIT_TIME = cfg.browser.short_wait_time
@@ -354,6 +469,36 @@ CREDIT_CARD_INFO = {
     "cvc": cfg.payment.credit_card.cvc
 }
 
+# 账单配置（字典形式，方便使用）
+BILLING_INFO = {
+    "use_static": cfg.payment.billing.use_static,
+    "name": cfg.payment.billing.name,
+    "country": cfg.payment.billing.country,
+    "state": cfg.payment.billing.state,
+    "city": cfg.payment.billing.city,
+    "address1": cfg.payment.billing.address1,
+    "address2": cfg.payment.billing.address2,
+    "zip": cfg.payment.billing.zip,
+}
+
+# 飞书多维表格配置（兼容导出）
+FEISHU_BITABLE_ENABLED = cfg.feishu_bitable.enabled
+FEISHU_API_BASE_URL = cfg.feishu_bitable.api_base_url
+FEISHU_APP_ID = cfg.feishu_bitable.app_id
+FEISHU_APP_SECRET = cfg.feishu_bitable.app_secret
+FEISHU_BITABLE_APP_TOKEN = cfg.feishu_bitable.app_token
+FEISHU_BITABLE_TABLE_ID = cfg.feishu_bitable.table_id
+FEISHU_BITABLE_CREATED_AT_FORMAT = cfg.feishu_bitable.created_at_format
+FEISHU_BITABLE_FIELDS = {
+    "email": cfg.feishu_bitable.fields.email,
+    "password": cfg.feishu_bitable.fields.password,
+    "registered_at": cfg.feishu_bitable.fields.registered_at,
+    "plus_redeemed_at": cfg.feishu_bitable.fields.plus_redeemed_at,
+    "account_type": cfg.feishu_bitable.fields.account_type,
+    "status": cfg.feishu_bitable.fields.status,
+    "created_at": cfg.feishu_bitable.fields.created_at,
+}
+
 
 # ==============================================================
 # 工具函数
@@ -382,8 +527,10 @@ def print_config_summary() -> None:
     print(f"  注册账号数量: {cfg.registration.total_accounts}")
     print(f"  邮箱域名: {cfg.email.domain}")
     print(f"  Worker URL: {cfg.email.worker_url[:30]}...")
+    print(f"  QQ 邮箱轮询: {'启用' if cfg.qq_email.enabled else '未启用'}")
     print(f"  账号保存文件: {cfg.files.accounts_file}")
     print(f"  批量间隔: {cfg.batch.interval_min}-{cfg.batch.interval_max}秒")
+    print(f"  飞书多维表格: {'启用' if cfg.feishu_bitable.enabled else '未启用'}")
     print("=" * 50 + "\n")
 
 

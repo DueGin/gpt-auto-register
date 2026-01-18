@@ -26,6 +26,7 @@ from config import (
 )
 from utils import generate_random_password, save_to_txt, update_account_status
 from email_service import create_temp_email, wait_for_verification_email
+from feishu_bitable import write_account_to_bitable
 from browser import (
     create_driver,
     fill_signup_form,
@@ -36,7 +37,7 @@ from browser import (
 )
 
 
-def register_one_account(monitor_callback=None):
+def register_one_account(monitor_callback=None, account_type: str = "GPT"):
     """
     注册单个账号
     :param monitor_callback: 回调函数 func(driver, step_name)，用于截图和中断检查
@@ -47,6 +48,7 @@ def register_one_account(monitor_callback=None):
     driver = None
     email = None
     password = None
+    bitable_record_id = None
     success = False
     
     # 辅助函数：执行回调
@@ -110,6 +112,14 @@ def register_one_account(monitor_callback=None):
         
         # 9. 保存账号信息 (注册成功)
         save_to_txt(email, password, "已注册")
+        bitable_ok, bitable_record_id = write_account_to_bitable(
+            email,
+            password,
+            status="已注册",
+            account_type=account_type,
+        )
+        if not bitable_ok:
+            print("⚠️ 飞书多维表格写入未成功（请检查 enabled/权限/app_token/table_id/字段名）")
         
         # 10. 完成注册
         print("\n" + "=" * 50)
@@ -128,29 +138,30 @@ def register_one_account(monitor_callback=None):
         print("🚀 开始开通 Plus 试用")
         print("-" * 30)
         
-        if subscribe_plus_trial(driver):
-            print("🎉 Plus 试用开通成功！")
-            update_account_status(email, "已开通Plus")
-            _report("plus_subscribed")
+        # if subscribe_plus_trial(driver):
+        #     print("🎉 Plus 试用开通成功！")
+        #     update_account_status(email, "已开通Plus", record_id=bitable_record_id)
+        #     # 如果启用了飞书多维表格，会自动更新“兑换Plus时间”
+        #     _report("plus_subscribed")
             
-            # 12. 取消订阅 (防止扣费)
-            print("\n" + "-" * 30)
-            print("🛑 正在取消订阅...")
-            print("-" * 30)
+        #     # 12. 取消订阅 (防止扣费)
+        #     print("\n" + "-" * 30)
+        #     print("🛑 正在取消订阅...")
+        #     print("-" * 30)
             
-            time.sleep(5)
-            if cancel_subscription(driver):
-                print("🎉 订阅已成功取消，流程完美结束！")
-                update_account_status(email, "已取消订阅")
-                _report("subscription_cancelled")
-            else:
-                print("⚠️ 订阅取消失败，请务必手动取消！")
-                update_account_status(email, "取消订阅失败")
-                _report("cancel_failed")
-        else:
-            print("⚠️ Plus 试用开通失败")
-            update_account_status(email, "Plus开通失败")
-            _report("plus_failed")
+        #     time.sleep(5)
+        #     if cancel_subscription(driver):
+        #         print("🎉 订阅已成功取消，流程完美结束！")
+        #         update_account_status(email, "已取消订阅")
+        #         _report("subscription_cancelled")
+        #     else:
+        #         print("⚠️ 订阅取消失败，请务必手动取消！")
+        #         update_account_status(email, "取消订阅失败")
+        #         _report("cancel_failed")
+        # else:
+        #     print("⚠️ Plus 试用开通失败")
+        #     update_account_status(email, "Plus开通失败")
+        #     _report("plus_failed")
             
         success = True
         time.sleep(5)

@@ -125,6 +125,18 @@ email:
   poll_interval: 3
   admin_password: "your-password"
 
+# QQ 邮箱读取（可选，用于 Cloudflare 路由转发到 QQ 邮箱）
+qq_email:
+  enabled: false
+  address: "your@qq.com"
+  auth_code: "qq-mail-auth-code"  # QQ 邮箱授权码（开启 IMAP/POP 后获取）
+  protocol: "imap"               # 可选 imap / pop
+  imap_host: "imap.qq.com"
+  imap_port: 993
+  pop_host: "pop.qq.com"
+  pop_port: 995
+  mailbox: "INBOX"
+
 # 浏览器配置
 browser:
   max_wait_time: 600
@@ -160,6 +172,24 @@ payment:
     expiry_month: "MM"
     expiry_year: "YYYY"
     cvc: "xxx"
+
+# 飞书多维表格（可选）：注册成功后写入账号/密码
+feishu_bitable:
+  enabled: false
+  # 国内飞书: https://open.feishu.cn/open-apis
+  # 国际 Lark: https://open.larksuite.com/open-apis
+  api_base_url: "https://open.feishu.cn/open-apis"
+  app_id: "cli_xxx"
+  app_secret: "xxx"
+  app_token: "bascxxx"   # 多维表格 App Token（base token）
+  table_id: "tblxxx"     # 数据表 ID
+  created_at_format: "timestamp_ms"  # datetime_str 或 timestamp_ms
+  fields:
+    email: "邮箱"
+    password: "密码"
+    registered_at: "注册时间"
+    plus_redeemed_at: "兑换Plus时间"
+    account_type: "类型"
 ```
 
 ### 必须配置
@@ -179,6 +209,21 @@ payment:
 | 最大年龄 | `registration.max_age` | 40 | 随机生日的最大年龄 |
 | 密码长度 | `password.length` | 16 | 密码长度 |
 | 邮件超时 | `email.wait_timeout` | 120 | 等待验证邮件超时（秒） |
+| QQ 邮箱轮询 | `qq_email.enabled` | false | Cloudflare 邮件路由到 QQ 时启用，从 QQ 邮箱读取验证码 |
+| 飞书多维表格写入 | `feishu_bitable.enabled` | false | 注册成功后将账号/密码写入飞书多维表格 |
+
+启用 `qq_email` 时，需要在 QQ 邮箱设置里开启 IMAP/POP 并获取授权码（与 SMTP/IMAP/POP 通用），同时 Cloudflare Email Routing 的转发目标应指向该 QQ 邮箱。
+
+### 飞书多维表格（可选）
+
+脚本会在“注册成功”后调用 `write_account_to_bitable()` 插入一条记录（每注册一个号插入一条）。
+
+需要在 `config.yaml` 配置：
+- `feishu_bitable.enabled: true`
+- `feishu_bitable.app_id` / `feishu_bitable.app_secret`（企业自建应用）
+- `feishu_bitable.app_token`（多维表格 base 的 App Token）
+- `feishu_bitable.table_id`（数据表 ID）
+- `feishu_bitable.fields.*`（字段名必须与表格列名完全一致）
 
 ## 模块说明
 
@@ -269,5 +314,3 @@ xxx@domain.com | password123 | 已取消订阅 | 2026-01-06 09:45:00
 2. **合规使用**：请严格遵守 OpenAI 的[使用条款](https://openai.com/policies/terms-of-use)。请勿将本工具用于任何商业用途、大规模批量注册或其他违反服务条款的行为。
 3. **风险自负**：使用者需自行承担使用本工具产生的任何后果（包括但不限于账号被封禁、IP 被拉黑等）。作者不对任何因使用本工具而导致的损失负责。
 4. **无担保**：本项目基于开源精神分享，不提供任何形式的保证或维护承诺。代码可能会因目标网站更新而失效。
-
-
