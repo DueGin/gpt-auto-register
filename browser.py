@@ -876,19 +876,88 @@ def subscribe_plus_trial(driver):
         print("💳 开始填写支付信息...")
         wait_input = WebDriverWait(driver, 15)
         
-        # 辅助函数：在当前上下文查找元素
+        # 辅助函数：在当前上下文查找元素（支持多个选择器）
         def find_visible(selector):
+            """查找可见元素，支持逗号分隔的多选择器"""
+            selectors = [s.strip() for s in selector.split(',')] if ',' in selector else [selector]
+            for sel in selectors:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed(): return el
+                except: 
+                    pass
+                try:
+                    el = driver.find_element(By.XPATH, sel) # 兼容 XPATH
+                    if el.is_displayed(): return el
+                except:
+                    pass
+            return None
+        
+        def find_all_inputs():
+            """查找所有可见的输入框"""
+            inputs = []
             try:
-                el = driver.find_element(By.CSS_SELECTOR, selector)
-                if el.is_displayed(): return el
-            except: 
-                pass
-            try:
-                el = driver.find_element(By.XPATH, selector) # 兼容 XPATH
-                if el.is_displayed(): return el
+                # 策略 1: 查找所有非隐藏、非提交的 input
+                all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input:not([type="hidden"]):not([type="submit"])')
+                for inp in all_inputs:
+                    try:
+                        if inp.is_displayed():
+                            inputs.append(inp)
+                    except:
+                        pass
             except:
                 pass
-            return None
+            
+            # 策略 2: 如果上面没有找到，尝试更通用的选择器
+            if not inputs:
+                try:
+                    all_inputs = driver.find_elements(By.TAG_NAME, 'input')
+                    for inp in all_inputs:
+                        try:
+                            # 排除隐藏的和提交按钮
+                            inp_type = inp.get_attribute('type') or 'text'
+                            if inp_type not in ['hidden', 'submit', 'button']:
+                                if inp.is_displayed():
+                                    inputs.append(inp)
+                        except:
+                            pass
+                except:
+                    pass
+            
+            return inputs
+        
+        def get_input_context(inp):
+            """获取输入框的上下文信息（label、placeholder、aria-label等）"""
+            context = ""
+            try:
+                context += inp.get_attribute('placeholder') or ""
+                context += " " + (inp.get_attribute('aria-label') or "")
+                context += " " + (inp.get_attribute('name') or "")
+                context += " " + (inp.get_attribute('id') or "")
+                context += " " + (inp.get_attribute('autocomplete') or "")
+                # Stripe/Elements 特定属性
+                context += " " + (inp.get_attribute('data-elements-stable-field-name') or "")
+                context += " " + (inp.get_attribute('aria-describedby') or "")
+                context += " " + (inp.get_attribute('data-test') or "")
+                context += " " + (inp.get_attribute('title') or "")
+                # 查找关联的 label
+                inp_id = inp.get_attribute('id')
+                if inp_id:
+                    try:
+                        label = driver.find_element(By.CSS_SELECTOR, f'label[for="{inp_id}"]')
+                        context += " " + (label.text or "")
+                    except:
+                        pass
+                # 查找父级的文本
+                try:
+                    parent = inp.find_element(By.XPATH, '..')
+                    parent_text = parent.text[:100] if parent.text else ""
+                    context += " " + parent_text
+                except:
+                    pass
+            except:
+                pass
+            return context.lower()
 
         # 辅助函数：遍历查找并执行操作
         def run_in_all_frames(action_name, action_func, max_depth=6):
@@ -927,11 +996,21 @@ def subscribe_plus_trial(driver):
             return found
 
         # ============== 1. 自动检测当前国家 ==============
-        current_country_code = "JP" # 默认兜底
-        detected_country_name = "Unknown"
+        current_country_code = "US" # 默认美国（根据截图页面默认是美国）
+        detected_country_name = "United States"
 
         def detect_country():
             nonlocal current_country_code, detected_country_name
+            
+            # 方法0: 直接在页面上查找"美国"文本
+            try:
+                page_text = driver.page_source
+                if "美国" in page_text or "United States" in page_text:
+                    current_country_code = "US"
+                    detected_country_name = "United States (页面文本)"
+                    return True
+            except:
+                pass
             
             # 尝试查找国家下拉框
             # 1. 查找 Select
@@ -990,67 +1069,202 @@ def subscribe_plus_trial(driver):
         print(f"   -> 检测结果: {detected_country_name} (Code: {current_country_code})")
         print("   -> 将生成该国家的真实地址进行填写")
 
-        # 生成对应国家的随机账单信息
-        billing_info = generate_billing_info(current_country_code)
+        # 生成对应国家的随机账单信息（传入 driver 以便复用浏览器获取地址）
+        billing_info = generate_billing_info(current_country_code, driver=driver)
+        
+        # ============== 智能表单填写 ==============
+        def smart_fill_field(keywords, value, field_description):
+            """
+            智能填写字段：通过关键词匹配输入框
+            keywords: 用于匹配的关键词列表
+            value: 要填入的值
+            field_description: 字段描述（用于日志）
+            """
+            inputs = find_all_inputs()
+            for inp in inputs:
+                context = get_input_context(inp)
+                # 检查是否匹配任何关键词
+                if any(kw in context for kw in keywords):
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                        time.sleep(0.3)
+                        inp.click()
+                        time.sleep(0.2)
+                        inp.clear()
+                        type_slowly(inp, value)
+                        print(f"  ✅ {field_description}: {value}")
+                        return True
+                    except Exception as e:
+                        print(f"  ⚠️ 填写 {field_description} 失败: {e}")
+            return False
         
         # ============== 2. 填写姓名 ==============
         def fill_name():
-            selectors = [
-                 # Stripe 常见 ID
-                 '#Field-nameInput', '#Field-billingNameInput', '#billingName',
-                 'input[id^="Field-nameInput"]', 'input[id*="billingName"]',
-                 'input[data-elements-stable-field-name="name"]',
-                 'input[data-elements-stable-field-name="billingName"]',
-                 # 通用属性
-                 'input[name="name"]', 'input[name="billingName"]', 
-                 'input[id="billingName"]', 
-                 # 中文和英文 Placeholder
-                 'input[placeholder*="全名"]', 'input[placeholder*="姓名"]',
-                 'input[placeholder*="Full name"]', 'input[placeholder*="Name on card"]',
-                 'input[aria-label*="姓名"]', 'input[aria-label*="name"]',
-                 'input[autocomplete="name"]', 'input[autocomplete="cc-name"]'
-            ]
-            wait = WebDriverWait(driver, 10)
-            for s in selectors:
-                try:
-                    el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, s)))
-                    if not el.is_displayed():
-                        continue
+            """填写姓名字段 - 多策略查找"""
+            # 策略 1: 直接通过 CSS 查询 placeholder 含"全名"的字段
+            print(f"  🔍 策略1: 查找 placeholder 含'全名'的字段...")
+            try:
+                inputs = driver.find_elements(By.CSS_SELECTOR, 'input[placeholder*="全名"], input[placeholder*="姓名"]')
+                print(f"     找到 {len(inputs)} 个匹配字段")
+                for inp in inputs:
                     try:
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-                    except Exception:
-                        pass
-                    try: el.click()
-                    except Exception: pass
-                    try: el.clear()
-                    except Exception: pass
-                    type_slowly(el, billing_info["name"])
-                    return True
-                except Exception:
-                    continue
+                        if inp.is_displayed():
+                            print(f"     ✓ 找到可见字段: {inp.get_attribute('placeholder')}")
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                            time.sleep(0.3)
+                            inp.click()
+                            time.sleep(0.3)
+                            inp.send_keys(Keys.CONTROL + "a")
+                            time.sleep(0.1)
+                            inp.send_keys(Keys.DELETE)
+                            time.sleep(0.2)
+                            type_slowly(inp, billing_info["name"])
+                            time.sleep(0.3)
+                            print(f"  ✅ 姓名已填写: {billing_info['name']}")
+                            return True
+                    except Exception as e:
+                        print(f"     ⚠️ 该字段不可用: {e}")
+            except Exception as e:
+                print(f"     ⚠️ 策略1失败: {e}")
+            
+            # 策略 2: 通过 label 标签找
+            print(f"  🔍 策略2: 通过 label 标签查找...")
+            try:
+                labels = driver.find_elements(By.XPATH, "//label[contains(text(), '全名') or contains(text(), '姓名')]")
+                for label in labels:
+                    inp_id = label.get_attribute('for')
+                    if inp_id:
+                        inp = driver.find_element(By.ID, inp_id)
+                        if inp.is_displayed():
+                            print(f"     ✓ 找到关联输入框: {inp_id}")
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                            time.sleep(0.3)
+                            inp.click()
+                            time.sleep(0.3)
+                            inp.send_keys(Keys.CONTROL + "a")
+                            time.sleep(0.1)
+                            inp.send_keys(Keys.DELETE)
+                            time.sleep(0.2)
+                            type_slowly(inp, billing_info["name"])
+                            time.sleep(0.3)
+                            print(f"  ✅ 姓名已填写: {billing_info['name']}")
+                            return True
+            except Exception as e:
+                print(f"     ⚠️ 策略2失败: {e}")
+            
+            # 策略 3: 通过绝对定位的 text 内容查找 label
+            print(f"  🔍 策略3: 通过 aria-label 查找...")
+            try:
+                inputs = driver.find_elements(By.XPATH, 
+                    "//input[@aria-label and (contains(@aria-label, '全名') or contains(@aria-label, '姓名'))]")
+                for inp in inputs:
+                    if inp.is_displayed():
+                        print(f"     ✓ 找到: {inp.get_attribute('aria-label')}")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                        time.sleep(0.3)
+                        inp.click()
+                        time.sleep(0.3)
+                        inp.send_keys(Keys.CONTROL + "a")
+                        time.sleep(0.1)
+                        inp.send_keys(Keys.DELETE)
+                        time.sleep(0.2)
+                        type_slowly(inp, billing_info["name"])
+                        time.sleep(0.3)
+                        print(f"  ✅ 姓名已填写: {billing_info['name']}")
+                        return True
+            except Exception as e:
+                print(f"     ⚠️ 策略3失败: {e}")
+            
+            # 策略 4: 遍历所有输入框，按顺序填写（可能是表单中第一个 name 输入框）
+            print(f"  🔍 策略4: 遍历所有输入框...")
+            inputs = find_all_inputs()
+            print(f"     找到 {len(inputs)} 个输入框")
+            
+            for idx, inp in enumerate(inputs):
+                context = get_input_context(inp)
+                print(f"     [{idx}] {context[:70]}")
+                
+                # 精确匹配"全名"或"姓名"
+                if '全名' in context or '姓名' in context:
+                    print(f"     ✓ 匹配到姓名字段 [{idx}]")
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                        time.sleep(0.3)
+                        inp.click()
+                        time.sleep(0.3)
+                        inp.send_keys(Keys.CONTROL + "a")
+                        time.sleep(0.1)
+                        inp.send_keys(Keys.DELETE)
+                        time.sleep(0.2)
+                        type_slowly(inp, billing_info["name"])
+                        time.sleep(0.3)
+                        print(f"  ✅ 姓名已填写: {billing_info['name']}")
+                        return True
+                    except Exception as e:
+                        print(f"  ⚠️ 填写失败: {e}")
+            
+            print(f"  ❌ 所有策略都失败了")
             return False
             
         print(f"👤 寻找并填写姓名: {billing_info['name']}...")
-        run_in_all_frames("填写姓名", fill_name)
+        # 先在主框架尝试
+        try:
+            driver.switch_to.default_content()
+            if fill_name():
+                print("  ✅ 在主框架成功填写姓名")
+            else:
+                print("  ⚠️ 主框架未找到姓名字段，尝试 iframe...")
+                run_in_all_frames("填写姓名", fill_name)
+        except Exception as e:
+            print(f"  ❌ 填写姓名出错: {e}")
         time.sleep(1)
 
         # ============== 3. 填写地址 ==============
         def fill_address():
-            # 1. 邮编 (Zip)
-            zip_el = find_visible('#Field-postalCodeInput, input[name="postalCode"], input[placeholder="邮政编码"], input[placeholder="Zip code"]')
-            if zip_el:
-                zip_el.clear()
-                type_slowly(zip_el, billing_info["zip"])
-                print(f"  ✅ 填写邮编: {billing_info['zip']}")
-                
-                # === 关键修正 ===
-                # 填写邮编后，Stripe 往往需要短暂网络请求才会显示 City/State 字段
-                # 如果不等待，后续查找 City/State 会失败，导致提交时只有 Zip
-                print("  ⏳ 等待二级地址字段加载 (3s)...")
-                time.sleep(3)
+            filled_any = False
             
-            # 2. 州/省 (State)
-            state_el = find_visible('#Field-administrativeAreaInput, #Field-koreanAdministrativeDistrictInput, select[name="state"], input[name="state"]')
+            # 地址字段关键词（新版页面可能只有一个"地址"字段）
+            address_keywords = ['地址', 'address', 'addressline', 'street', '街道']
+            if smart_fill_field(address_keywords, billing_info["address1"], "地址"):
+                filled_any = True
+                time.sleep(1)
+                # 关闭可能出现的自动完成下拉
+                try: ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                except: pass
+            
+            # 邮编字段
+            zip_keywords = ['邮编', 'zip', 'postal', 'postcode', '邮政编码']
+            if smart_fill_field(zip_keywords, billing_info["zip"], "邮编"):
+                filled_any = True
+                time.sleep(2)  # 等待可能的二级字段加载
+            
+            # 城市字段
+            city_keywords = ['城市', 'city', 'locality', '市']
+            if smart_fill_field(city_keywords, billing_info["city"], "城市"):
+                filled_any = True
+            
+            # 州/省字段
+            state_keywords = ['州', 'state', 'province', 'region', '省']
+            state_el = None
+            inputs = find_all_inputs()
+            for inp in inputs:
+                context = get_input_context(inp)
+                if any(kw in context for kw in state_keywords) and 'united states' not in context:
+                    state_el = inp
+                    break
+            
+            # 也检查 select 下拉框
+            if not state_el:
+                try:
+                    selects = driver.find_elements(By.TAG_NAME, 'select')
+                    for sel in selects:
+                        context = get_input_context(sel)
+                        if any(kw in context for kw in state_keywords):
+                            state_el = sel
+                            break
+                except:
+                    pass
+            
             if state_el:
                 try:
                     if state_el.tag_name == 'select':
@@ -1059,35 +1273,15 @@ def subscribe_plus_trial(driver):
                     else:
                         state_el.clear()
                         type_slowly(state_el, billing_info["state"])
+                        time.sleep(0.3)
                         state_el.send_keys(Keys.ARROW_DOWN)
                         state_el.send_keys(Keys.ENTER)
-                    print(f"  ✅ 填写州/省: {billing_info['state']}")
-                except: 
-                    try:
-                        state_el.click()
-                        time.sleep(0.5)
-                        ActionChains(driver).send_keys(billing_info["state"]).send_keys(Keys.ENTER).perform()
-                    except: pass
-
-            # 3. 城市 (City)
-            city_el = find_visible('#Field-localityInput, input[name="city"], input[placeholder="城市"], input[placeholder="City"]')
-            if city_el:
-                city_el.clear()
-                type_slowly(city_el, billing_info["city"])
-                print(f"  ✅ 填写城市: {billing_info['city']}")
-
-            # 4. 地址行1
-            line1_el = find_visible('#Field-addressLine1Input, input[name="addressLine1"], input[placeholder="地址第 1 行"], input[placeholder="Address line 1"]')
-            if line1_el:
-                line1_el.clear()
-                type_slowly(line1_el, billing_info["address1"])
-                time.sleep(0.5)
-                # 有些自动完成弹窗需要 ESC 关闭
-                try: ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                except: pass
-                print(f"  ✅ 填写地址行1: {billing_info['address1']}")
+                    print(f"  ✅ 州/省: {billing_info['state']}")
+                    filled_any = True
+                except Exception as e:
+                    print(f"  ⚠️ 填写州失败: {e}")
                 
-            return True
+            return filled_any or True  # 即使没填也返回 True 继续执行
 
         print("🏠 寻找并填写地址...")
         run_in_all_frames("填写地址", fill_address)
@@ -1100,35 +1294,167 @@ def subscribe_plus_trial(driver):
         try: driver.switch_to.default_content()
         except: pass
         
-        # 卡号
-        if not handle_stripe_input(
-            driver,
-            '卡号',
-            'input[name="cardnumber"], input[name="number"], input[id="Field-numberInput"], '
-            'input[data-elements-stable-field-name="cardNumber"], '
-            'input[placeholder*="Card number"], input[placeholder*="0000"], input[placeholder*="卡号"], '
-            'input[placeholder*="1234 1234 1234"], input[aria-label*="卡号"], input[autocomplete="cc-number"]',
-            card["number"]
-        ):
-             print("❌ 卡号输入失败")
-        
-        time.sleep(1)
-        
-        # 有效期
-        if not handle_stripe_input(driver, '有效期', 
-            'input[name="exp-date"], input[name="expirationDate"], input[name="expiry"], '
-            'input[id="cardExpiry"], input[id="Field-expiryInput"], '
-            'input[data-elements-stable-field-name="cardExpiry"], '
-            'input[placeholder="MM / YY"], input[placeholder*="月/年"], '
-            'input[placeholder*="有效期"], input[aria-label*="有效期"], input[autocomplete="cc-exp"]', 
-            card["expiry"]):
-            print("❌ 有效期输入失败")
+        # 直接填写信用卡字段（不通过 run_in_all_frames，避免 nonlocal 问题）
+        def fill_card_direct():
+            """直接在当前上下文填写信用卡字段"""
+            filled_count = 0
             
-        time.sleep(1)
+            inputs = find_all_inputs()
+            print(f"  📂 当前上下文找到 {len(inputs)} 个输入框")
+            
+            # 第一遍：只找卡号
+            for inp in inputs:
+                context = get_input_context(inp)
+                is_card = ('卡号' in context or 'cardnumber' in context or 'cc-number' in context or 
+                          ('1234' in context and '/' not in context and 'expir' not in context))
+                is_not_other = ('安全' not in context and 'cvc' not in context and 'cvv' not in context and 
+                               '有效' not in context and 'expir' not in context)
+                
+                if is_card and is_not_other:
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                        inp.click()
+                        time.sleep(0.2)
+                        inp.clear()
+                        type_slowly(inp, card["number"], delay=0.02)
+                        print(f"  ✅ 卡号: {card['number'][:4]}****{card['number'][-4:]}")
+                        filled_count += 1
+                        time.sleep(0.5)
+                        break
+                    except Exception as e:
+                        print(f"  ⚠️ 卡号填写失败: {e}")
+            
+            # 重新获取输入框
+            inputs = find_all_inputs()
+            
+            # 第二遍：只找有效期
+            for inp in inputs:
+                context = get_input_context(inp)
+                is_expiry = ('有效期' in context or '月/年' in context or 'expir' in context or 
+                            'mm / yy' in context or 'mm/yy' in context or 'cc-exp' in context or
+                            ('exp' in context and 'security' not in context and 'cvc' not in context))
+                
+                if is_expiry:
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                        inp.click()
+                        time.sleep(0.2)
+                        inp.clear()
+                        type_slowly(inp, card["expiry"], delay=0.05)
+                        print(f"  ✅ 有效期: {card['expiry']}")
+                        filled_count += 1
+                        time.sleep(0.5)
+                        break
+                    except Exception as e:
+                        print(f"  ⚠️ 有效期填写失败: {e}")
+            
+            # 重新获取输入框
+            inputs = find_all_inputs()
+            
+            # 第三遍：只找安全码
+            for inp in inputs:
+                context = get_input_context(inp)
+                is_cvc = ('安全码' in context or 'cvc' in context or 'cvv' in context or 
+                         'security code' in context or 'securitycode' in context or
+                         (context.strip() == '' and len(context) < 20))  # 空的或很短的字段可能是 CVC
+                is_not_card = ('卡号' not in context and 'cardnumber' not in context and 
+                              '1234 1234' not in context and 'number' not in context)
+                is_not_expiry = ('有效期' not in context and 'expir' not in context and 'mm/' not in context)
+                
+                if is_cvc and is_not_card and is_not_expiry:
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inp)
+                        inp.click()
+                        time.sleep(0.2)
+                        inp.clear()
+                        type_slowly(inp, card["cvc"], delay=0.05)
+                        print(f"  ✅ 安全码: {card['cvc']}")
+                        filled_count += 1
+                        break
+                    except Exception as e:
+                        print(f"  ⚠️ 安全码填写失败: {e}")
+            
+            return filled_count
         
-        # CVC
-        if not handle_stripe_input(driver, 'CVC', 'input[name="cvc"], input[name="securityCode"], input[id="cardCvc"], input[id="Field-cvcInput"], input[data-elements-stable-field-name="cardCvc"], input[placeholder="CVC"], input[placeholder*="安全码"], input[aria-label*="安全码"]', card["cvc"]):
-             print("❌ CVC 输入失败")
+        # 在主文档和所有 iframe 中尝试
+        def try_fill_card_in_frames():
+            total_filled = 0
+            
+            def _traverse_frames(depth=0, max_depth=5):
+                nonlocal total_filled
+                if depth > max_depth:
+                    return
+                
+                filled = fill_card_direct()
+                total_filled += filled
+                
+                if filled >= 3:  # 三个字段都填了
+                    return
+                
+                frames = driver.find_elements(By.TAG_NAME, "iframe")
+                for frame in frames:
+                    try:
+                        if frame.is_displayed():
+                            driver.switch_to.frame(frame)
+                            _traverse_frames(depth + 1, max_depth)
+                            if total_filled >= 3:
+                                driver.switch_to.default_content()
+                                return
+                            driver.switch_to.parent_frame()
+                    except:
+                        try:
+                            driver.switch_to.parent_frame()
+                        except:
+                            pass
+            
+            driver.switch_to.default_content()
+            _traverse_frames()
+            return total_filled
+        
+        filled_card_fields = try_fill_card_in_frames()
+        print(f"  📊 共填写了 {filled_card_fields} 个信用卡字段")
+        
+        # 如果没有填写成功，尝试传统选择器
+        if filled_card_fields < 3:
+            print("  ⚠️ 智能填写未完全成功，尝试传统选择器...")
+            driver.switch_to.default_content()
+            
+            # 卡号
+            if filled_card_fields < 1 and not handle_stripe_input(
+                driver, '卡号',
+                'input[name="cardnumber"], input[name="number"], input[id="Field-numberInput"], '
+                'input[data-elements-stable-field-name="cardNumber"], '
+                'input[placeholder*="Card number"], input[placeholder*="0000"], input[placeholder*="卡号"], '
+                'input[placeholder*="1234 1234 1234"], input[aria-label*="卡号"], input[autocomplete="cc-number"]',
+                card["number"]
+            ):
+                print("  ❌ 卡号输入失败")
+            
+            time.sleep(1)
+            
+            # 有效期
+            if filled_card_fields < 2 and not handle_stripe_input(
+                driver, '有效期',
+                'input[name="exp-date"], input[name="expirationDate"], input[name="expiry"], '
+                'input[id="cardExpiry"], input[id="Field-expiryInput"], '
+                'input[data-elements-stable-field-name="cardExpiry"], '
+                'input[placeholder="MM / YY"], input[placeholder*="月/年"], '
+                'input[placeholder*="有效期"], input[aria-label*="有效期"], input[autocomplete="cc-exp"]',
+                card["expiry"]
+            ):
+                print("  ❌ 有效期输入失败")
+            
+            time.sleep(1)
+            
+            # CVC
+            if filled_card_fields < 3 and not handle_stripe_input(
+                driver, 'CVC',
+                'input[name="cvc"], input[name="securityCode"], input[id="cardCvc"], input[id="Field-cvcInput"], '
+                'input[data-elements-stable-field-name="cardCvc"], '
+                'input[placeholder="CVC"], input[placeholder*="安全码"], input[aria-label*="安全码"]',
+                card["cvc"]
+            ):
+                print("  ❌ CVC 输入失败")
 
         time.sleep(2)
         
@@ -1140,11 +1466,37 @@ def subscribe_plus_trial(driver):
                 
                 # 1. 点击提交
                 driver.switch_to.default_content() # 按钮通常在主文档
-                try:
-                    submit_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit'], button[class*='Subscribe']")))
-                    driver.execute_script("arguments[0].click();", submit_btn)
-                    print("  🔘 已点击提交按钮")
-                except:
+                submit_clicked = False
+                
+                # 尝试多种提交按钮选择器
+                submit_selectors = [
+                    "button[type='submit']",
+                    "button[class*='Subscribe']",
+                    "button[class*='submit']",
+                    "//button[contains(text(), '订阅')]",
+                    "//button[contains(text(), 'Subscribe')]",
+                    "//button[contains(text(), '提交')]",
+                    "//button[contains(text(), '支付')]",
+                    "//button[contains(text(), 'Pay')]",
+                ]
+                
+                for selector in submit_selectors:
+                    try:
+                        if selector.startswith('//'):
+                            btn = driver.find_element(By.XPATH, selector)
+                        else:
+                            btn = driver.find_element(By.CSS_SELECTOR, selector)
+                        if btn.is_displayed() and btn.is_enabled():
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", btn)
+                            print(f"  🔘 已点击提交按钮: {btn.text or selector}")
+                            submit_clicked = True
+                            break
+                    except:
+                        continue
+                
+                if not submit_clicked:
                     print("  ⚠️ 未找到提交按钮")
                 
                 time.sleep(3) # 等待校验结果

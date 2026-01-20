@@ -123,6 +123,7 @@ class BillingInfoConfig:
     address1: str = ""
     address2: str = ""
     zip: str = ""
+    address_source: str = "local"  # "local" 或 "meiguodizhi"
 
 
 @dataclass
@@ -345,7 +346,8 @@ class ConfigLoader:
                     city=payment.get('billing', {}).get('city', ''),
                     address1=payment.get('billing', {}).get('address1', ''),
                     address2=payment.get('billing', {}).get('address2', ''),
-                    zip=payment.get('billing', {}).get('zip', '')
+                    zip=payment.get('billing', {}).get('zip', ''),
+                    address_source=payment.get('address_source', 'local')
                 )
             )
 
@@ -461,9 +463,34 @@ BATCH_INTERVAL_MAX = cfg.batch.interval_max
 TXT_FILE = cfg.files.accounts_file
 
 # 支付配置（字典格式，兼容旧代码）
+def _normalize_expiry(expiry, month, year):
+    expiry_raw = "" if expiry is None else str(expiry)
+    expiry_digits = "".join(ch for ch in expiry_raw if ch.isdigit())
+    if expiry_digits:
+        return expiry_digits
+
+    month_raw = "" if month is None else str(month)
+    year_raw = "" if year is None else str(year)
+    month_digits = "".join(ch for ch in month_raw if ch.isdigit())
+    year_digits = "".join(ch for ch in year_raw if ch.isdigit())
+
+    if month_digits:
+        month_digits = month_digits.zfill(2)
+    if year_digits:
+        year_digits = year_digits[-2:]
+
+    if month_digits and year_digits:
+        return f"{month_digits}{year_digits}"
+    return ""
+
+_expiry_value = _normalize_expiry(
+    cfg.payment.credit_card.expiry,
+    cfg.payment.credit_card.expiry_month,
+    cfg.payment.credit_card.expiry_year,
+)
 CREDIT_CARD_INFO = {
     "number": cfg.payment.credit_card.number,
-    "expiry": cfg.payment.credit_card.expiry,
+    "expiry": _expiry_value,
     "expiry_month": cfg.payment.credit_card.expiry_month,
     "expiry_year": cfg.payment.credit_card.expiry_year,
     "cvc": cfg.payment.credit_card.cvc
@@ -479,6 +506,7 @@ BILLING_INFO = {
     "address1": cfg.payment.billing.address1,
     "address2": cfg.payment.billing.address2,
     "zip": cfg.payment.billing.zip,
+    "address_source": cfg.payment.billing.address_source,
 }
 
 # 飞书多维表格配置（兼容导出）

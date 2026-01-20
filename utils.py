@@ -9,6 +9,7 @@ import csv
 import os
 import re
 import time
+import json
 from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
@@ -27,6 +28,15 @@ from config import (
     MAX_AGE,
     BILLING_INFO
 )
+
+# 尝试导入 BeautifulSoup 用于网页解析
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+    print("⚠️ BeautifulSoup 未安装，meiguodizhi.com 地址抓取功能将不可用")
+    print("   安装命令: pip install beautifulsoup4")
 
 # 尝试导入 Faker 库
 try:
@@ -330,67 +340,6 @@ def generate_user_info():
     }
 
 
-def generate_japan_address():
-    """
-    生成随机日本地址
-    使用 Faker 生成更真实多样的日本地址
-    """
-    if FAKER_AVAILABLE:
-        # 创建日本本地化的 Faker 实例
-        fake_jp = Faker('ja_JP')
-        
-        # 日本主要城市的区域信息
-        tokyo_wards = [
-            {"ward": "Chiyoda-ku", "zip_prefix": "100"},
-            {"ward": "Shibuya-ku", "zip_prefix": "150"},
-            {"ward": "Shinjuku-ku", "zip_prefix": "160"},
-            {"ward": "Minato-ku", "zip_prefix": "105"},
-            {"ward": "Meguro-ku", "zip_prefix": "153"},
-            {"ward": "Setagaya-ku", "zip_prefix": "154"},
-            {"ward": "Nakano-ku", "zip_prefix": "164"},
-            {"ward": "Toshima-ku", "zip_prefix": "170"},
-        ]
-        
-        osaka_areas = [
-            {"area": "Kita-ku", "zip_prefix": "530"},
-            {"area": "Chuo-ku", "zip_prefix": "540"},
-            {"area": "Nishi-ku", "zip_prefix": "550"},
-            {"area": "Tennoji-ku", "zip_prefix": "543"},
-        ]
-        
-        # 随机选择城市
-        if random.random() < 0.7:  # 70% 东京
-            ward_info = random.choice(tokyo_wards)
-            addr = {
-                "zip": f"{ward_info['zip_prefix']}-{random.randint(1000, 9999)}",
-                "state": "Tokyo",
-                "city": ward_info["ward"],
-                "address1": f"{random.randint(1, 9)}-{random.randint(1, 30)}-{random.randint(1, 20)}"
-            }
-        else:  # 30% 大阪
-            area_info = random.choice(osaka_areas)
-            addr = {
-                "zip": f"{area_info['zip_prefix']}-{random.randint(1000, 9999)}",
-                "state": "Osaka",
-                "city": area_info["area"],
-                "address1": f"{random.randint(1, 9)}-{random.randint(1, 30)}-{random.randint(1, 20)}"
-            }
-    else:
-        # 回退到旧的固定地址列表
-        addresses = [
-            {"zip": "100-0005", "state": "Tokyo", "city": "Chiyoda-ku", "address1": "1-1 Marunouchi"},
-            {"zip": "160-0022", "state": "Tokyo", "city": "Shinjuku-ku", "address1": "3-14-1 Shinjuku"},
-            {"zip": "150-0002", "state": "Tokyo", "city": "Shibuya-ku", "address1": "2-21-1 Shibuya"},
-            {"zip": "530-0001", "state": "Osaka", "city": "Osaka-shi", "address1": "1-1 Umeda"},
-        ]
-        addr = random.choice(addresses)
-        random_suffix = f"{random.randint(1, 9)}-{random.randint(1, 20)}"
-        addr["address1"] = f"{addr['address1']} {random_suffix}"
-    
-    print(f"✅ 已生成日本地址: {addr['state']} {addr['city']} {addr['address1']}")
-    return addr
-
-
 def generate_us_address():
     """
     生成随机美国地址
@@ -436,20 +385,129 @@ def generate_us_address():
     return addr
 
 
-def generate_billing_info(country="JP"):
+def fetch_meiguodizhi_address(driver=None):
+    """
+    从 meiguodizhi.com API 获取随机美国地址和姓名
+    
+    参数:
+        driver: 可选的 Selenium WebDriver 实例（该函数使用 requests 库直接调用 API）
+    
+    返回:
+        dict: 包含姓名和地址的字典，失败时返回 None
+              {
+                  'name': '姓名',
+                  'address1': '街道地址',
+                  'city': '城市',
+                  'state': '州缩写',
+                  'zip': '邮编'
+              }
+    """
+    try:
+        print("🌐 正在从 meiguodizhi.com API 获取随机美国地址...")
+        
+        import requests
+        import json
+        
+        # meiguodizhi.com API 端点（添加时间戳参数避免缓存）
+        timestamp = int(time.time() * 1000)
+        api_url = f'https://www.meiguodizhi.com/api/v1/dz?t={timestamp}'
+        
+        # 添加 headers 模拟浏览器请求
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Referer': 'https://www.meiguodizhi.com/'
+        }
+        
+        # 发送请求
+        response = requests.get(api_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # 解析 JSON 响应
+        data = response.json()
+        
+        # 检查响应状态
+        if data.get('status') != 'ok' or not data.get('address'):
+            print(f"⚠️ API 返回异常: {data.get('status')}")
+            return None
+        
+        address_info = data['address']
+        
+        # 提取需要的字段
+        address_data = {
+            'name': address_info.get('Full_Name', '').strip(),
+            'address1': address_info.get('Address', '').strip(),
+            'city': address_info.get('City', '').strip(),
+            'state': address_info.get('State', '').strip(),  # 使用州缩写 (如 KY)
+            'zip': address_info.get('Zip_Code', '').strip()
+        }
+        
+        # 验证必要字段
+        required_fields = ['name', 'address1', 'city', 'state', 'zip']
+        if all(field in address_data and address_data[field] for field in required_fields):
+            print(f"✅ 成功从 meiguodizhi.com 获取地址:")
+            print(f"   姓名: {address_data['name']}")
+            print(f"   地址: {address_data['address1']}, {address_data['city']}, {address_data['state']} {address_data['zip']}")
+            return address_data
+        else:
+            print("⚠️ 从 meiguodizhi.com 提取地址数据不完整，将使用本地生成")
+            print(f"   已提取的数据: {address_data}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        print("❌ 从 meiguodizhi.com 获取地址超时（网络延迟）")
+        return None
+    except requests.exceptions.ConnectionError:
+        print("❌ 无法连接到 meiguodizhi.com（网络错误或网站不可用）")
+        return None
+    except json.JSONDecodeError:
+        print("❌ 解析 meiguodizhi.com 响应失败（返回数据不是有效 JSON）")
+        return None
+    except Exception as e:
+        print(f"❌ 从 meiguodizhi.com 获取地址失败: {e}")
+        return None
+
+
+def generate_billing_info(country="US", driver=None):
     """
     生成完整的支付账单信息（姓名 + 地址）
     
     参数:
-        country: 国家代码，"JP" 或 "US"
+        country: 国家代码，默认 "US"（美国）
+        driver: 可选的 Selenium WebDriver 实例，用于从 meiguodizhi.com 获取地址时复用
     
     返回:
         dict: 包含姓名和地址的完整账单信息
     """
-    # 优先使用配置中的静态账单信息
     billing_cfg = BILLING_INFO
-    if billing_cfg.get("use_static") or billing_cfg.get("address1") or billing_cfg.get("city") or billing_cfg.get("state") or billing_cfg.get("zip"):
-        country_code = (billing_cfg.get("country") or country).upper()
+    
+    # 1. 检查是否要使用 meiguodizhi.com 获取地址
+    address_source = billing_cfg.get("address_source", "local")
+    
+    if address_source == "meiguodizhi":
+        print("🌐 配置要求从 meiguodizhi.com 获取地址...")
+        # 尝试从 meiguodizhi.com 获取地址
+        meiguodizhi_data = fetch_meiguodizhi_address(driver=driver)
+        if meiguodizhi_data:
+            name = billing_cfg.get("name") or meiguodizhi_data.get("name", "") or generate_random_name()
+            billing_info = {
+                "name": name,
+                "zip": meiguodizhi_data.get("zip", ""),
+                "state": meiguodizhi_data.get("state", ""),
+                "city": meiguodizhi_data.get("city", ""),
+                "address1": meiguodizhi_data.get("address1", ""),
+                "address2": "",
+                "country": "US"
+            }
+            print("✅ 已从 meiguodizhi.com API 获取新地址:")
+            print(f"   姓名: {billing_info['name']}")
+            print(f"   完整地址: {billing_info['address1']}, {billing_info['city']}, {billing_info['state']} {billing_info['zip']}")
+            return billing_info
+        else:
+            print("⚠️ meiguodizhi.com API 调用失败，回退到本地生成")
+    
+    # 2. 检查是否使用配置中的静态账单信息
+    if billing_cfg.get("use_static"):
         name = billing_cfg.get("name") or generate_random_name()
         billing_info = {
             "name": name,
@@ -458,21 +516,17 @@ def generate_billing_info(country="JP"):
             "city": billing_cfg.get("city", ""),
             "address1": billing_cfg.get("address1", ""),
             "address2": billing_cfg.get("address2", ""),
-            "country": country_code
+            "country": billing_cfg.get("country", country).upper()
         }
         print("📋 使用配置中的账单信息:")
         print(f"   姓名: {billing_info['name']}")
         print(f"   地址: {billing_info['address1']}, {billing_info['city']}, {billing_info['state']} {billing_info['zip']}")
         return billing_info
-
-    # 生成姓名
-    name = generate_random_name()
     
-    # 根据国家生成地址
-    if country.upper() == "US":
-        address = generate_us_address()
-    else:
-        address = generate_japan_address()
+    # 3. 本地生成随机地址（默认）
+    print("🎲 使用本地生成的随机地址")
+    name = billing_cfg.get("name") or generate_random_name()
+    address = generate_us_address()
     
     billing_info = {
         "name": name,
@@ -480,7 +534,7 @@ def generate_billing_info(country="JP"):
         "state": address["state"],
         "city": address["city"],
         "address1": address["address1"],
-        "country": country.upper()
+        "country": "US"
     }
     
     print(f"📋 完整账单信息已生成:")

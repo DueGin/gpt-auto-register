@@ -22,7 +22,8 @@ import random
 from config import (
     TOTAL_ACCOUNTS,
     BATCH_INTERVAL_MIN,
-    BATCH_INTERVAL_MAX
+    BATCH_INTERVAL_MAX,
+    CREDIT_CARD_INFO
 )
 from utils import generate_random_password, save_to_txt, update_account_status
 from email_service import create_temp_email, wait_for_verification_email
@@ -138,30 +139,39 @@ def register_one_account(monitor_callback=None, account_type: str = "GPT"):
         print("🚀 开始开通 Plus 试用")
         print("-" * 30)
         
-        # if subscribe_plus_trial(driver):
-        #     print("🎉 Plus 试用开通成功！")
-        #     update_account_status(email, "已开通Plus", record_id=bitable_record_id)
-        #     # 如果启用了飞书多维表格，会自动更新“兑换Plus时间”
-        #     _report("plus_subscribed")
-            
-        #     # 12. 取消订阅 (防止扣费)
-        #     print("\n" + "-" * 30)
-        #     print("🛑 正在取消订阅...")
-        #     print("-" * 30)
-            
-        #     time.sleep(5)
-        #     if cancel_subscription(driver):
-        #         print("🎉 订阅已成功取消，流程完美结束！")
-        #         update_account_status(email, "已取消订阅")
-        #         _report("subscription_cancelled")
-        #     else:
-        #         print("⚠️ 订阅取消失败，请务必手动取消！")
-        #         update_account_status(email, "取消订阅失败")
-        #         _report("cancel_failed")
-        # else:
-        #     print("⚠️ Plus 试用开通失败")
-        #     update_account_status(email, "Plus开通失败")
-        #     _report("plus_failed")
+        def _can_auto_subscribe(card_info):
+            required = ("number", "expiry", "cvc")
+            missing = [k for k in required if not card_info.get(k)]
+            if missing:
+                print(f"⚠️ 未配置完整信用卡信息，跳过自动绑卡: {', '.join(missing)}")
+                return False
+            return True
+
+        if _can_auto_subscribe(CREDIT_CARD_INFO):
+            if subscribe_plus_trial(driver):
+                print("🎉 Plus 试用开通成功！")
+                update_account_status(email, "已开通Plus", record_id=bitable_record_id)
+                # 如果启用了飞书多维表格，会自动更新“兑换Plus时间”
+                _report("plus_subscribed")
+                
+                # 12. 取消订阅 (防止扣费)
+                print("\n" + "-" * 30)
+                print("🛑 正在取消订阅...")
+                print("-" * 30)
+                
+                time.sleep(5)
+                if cancel_subscription(driver):
+                    print("🎉 订阅已成功取消，流程完美结束！")
+                    update_account_status(email, "已取消订阅")
+                    _report("subscription_cancelled")
+                else:
+                    print("⚠️ 订阅取消失败，请务必手动取消！")
+                    update_account_status(email, "取消订阅失败")
+                    _report("cancel_failed")
+            else:
+                print("⚠️ Plus 试用开通失败")
+                update_account_status(email, "Plus开通失败")
+                _report("plus_failed")
             
         success = True
         time.sleep(5)
