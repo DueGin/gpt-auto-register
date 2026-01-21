@@ -123,7 +123,7 @@ class BillingInfoConfig:
     address1: str = ""
     address2: str = ""
     zip: str = ""
-    address_source: str = "local"  # "local" 或 "meiguodizhi"
+    address_source: str = "local"  # "local" / "meiguodizhi" / "scraped"
 
 
 @dataclass
@@ -347,7 +347,7 @@ class ConfigLoader:
                     address1=payment.get('billing', {}).get('address1', ''),
                     address2=payment.get('billing', {}).get('address2', ''),
                     zip=payment.get('billing', {}).get('zip', ''),
-                    address_source=payment.get('address_source', 'local')
+                    address_source=payment.get('billing', {}).get('address_source', 'local')
                 )
             )
 
@@ -507,6 +507,7 @@ BILLING_INFO = {
     "address2": cfg.payment.billing.address2,
     "zip": cfg.payment.billing.zip,
     "address_source": cfg.payment.billing.address_source,
+    "scraped_dir": "美国地址爬虫_副本",
 }
 
 # 飞书多维表格配置（兼容导出）

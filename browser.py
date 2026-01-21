@@ -1090,8 +1090,17 @@ def subscribe_plus_trial(driver):
                         time.sleep(0.3)
                         inp.click()
                         time.sleep(0.2)
-                        inp.clear()
+                        
+                        # 多步骤清空字段，确保彻底移除已有内容
+                        inp.send_keys(Keys.CONTROL + "a")  # 全选
+                        time.sleep(0.1)
+                        inp.send_keys(Keys.DELETE)  # 删除
+                        time.sleep(0.1)
+                        inp.clear()  # 再清一遍
+                        time.sleep(0.2)
+                        
                         type_slowly(inp, value)
+                        time.sleep(0.2)
                         print(f"  ✅ {field_description}: {value}")
                         return True
                     except Exception as e:
@@ -1101,6 +1110,9 @@ def subscribe_plus_trial(driver):
         # ============== 2. 填写姓名 ==============
         def fill_name():
             """填写姓名字段 - 多策略查找"""
+            # 先等待，确保 DOM 已加载
+            time.sleep(0.5)
+            
             # 策略 1: 直接通过 CSS 查询 placeholder 含"全名"的字段
             print(f"  🔍 策略1: 查找 placeholder 含'全名'的字段...")
             try:
@@ -1207,41 +1219,133 @@ def subscribe_plus_trial(driver):
             return False
             
         print(f"👤 寻找并填写姓名: {billing_info['name']}...")
-        # 先在主框架尝试
-        try:
-            driver.switch_to.default_content()
-            if fill_name():
-                print("  ✅ 在主框架成功填写姓名")
-            else:
-                print("  ⚠️ 主框架未找到姓名字段，尝试 iframe...")
-                run_in_all_frames("填写姓名", fill_name)
-        except Exception as e:
-            print(f"  ❌ 填写姓名出错: {e}")
-        time.sleep(1)
+        
+        # 带重试的填写姓名函数
+        def fill_name_with_retry(max_attempts=5, wait_between=2):
+            """带重试机制的填写姓名，等待字段加载"""
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    print(f"  ⏳ 第 {attempt+1}/{max_attempts} 次尝试 (等待 {wait_between}s)...")
+                    time.sleep(wait_between)
+                
+                # 先在主框架尝试
+                try:
+                    driver.switch_to.default_content()
+                    if fill_name():
+                        print("  ✅ 在主框架成功填写姓名")
+                        return True
+                except:
+                    pass
+                
+                # 再尝试所有 iframe
+                try:
+                    driver.switch_to.default_content()
+                    frames = driver.find_elements(By.TAG_NAME, "iframe")
+                    for frame_idx, frame in enumerate(frames):
+                        try:
+                            driver.switch_to.frame(frame)
+                            if fill_name():
+                                print(f"  ✅ 在 iframe[{frame_idx}] 成功填写姓名")
+                                driver.switch_to.default_content()
+                                return True
+                            driver.switch_to.default_content()
+                        except:
+                            driver.switch_to.default_content()
+                except:
+                    pass
+            
+            print("  ❌ 多次重试后仍无法找到姓名字段")
+            return False
+        
+        # 执行带重试的填写
+        fill_name_with_retry(max_attempts=8, wait_between=2)
 
         # ============== 3. 填写地址 ==============
         def fill_address():
             filled_any = False
+            google_autofilled = False  # 标记 Google 是否自动填充了地址
             
             # 地址字段关键词（新版页面可能只有一个"地址"字段）
             address_keywords = ['地址', 'address', 'addressline', 'street', '街道']
             if smart_fill_field(address_keywords, billing_info["address1"], "地址"):
                 filled_any = True
-                time.sleep(1)
-                # 关闭可能出现的自动完成下拉
-                try: ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                except: pass
+                time.sleep(0.8)
+                
+                # 输入地址后，尝试选择第一个推荐地址
+                try:
+                    # 等待自动完成下拉出现
+                    time.sleep(0.5)
+                    
+                    # 查找推荐地址列表（常见的选择器）
+                    suggestions = None
+                    suggestion_selectors = [
+                        '//*[contains(@class, "autocomplete") or contains(@class, "suggestion") or contains(@class, "dropdown")]//div[not(./*)][text()]',
+                        '//*[@role="listbox"]//div[@role="option"]',
+                        '//ul[contains(@class, "autocomplete")]//li',
+                        '//*[contains(@class, "place-list")]//li',
+                        '//*[contains(text(), "Maplewood") or contains(text(), "Maple")]',
+                    ]
+                    
+                    first_suggestion = None
+                    for selector in suggestion_selectors:
+                        try:
+                            if selector.startswith('//'):
+                                elements = driver.find_elements(By.XPATH, selector)
+                            else:
+                                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                            
+                            if elements:
+                                first_suggestion = elements[0]
+                                print(f"  ✅ 找到推荐地址: {first_suggestion.text[:50]}")
+                                break
+                        except:
+                            continue
+                    
+                    if first_suggestion:
+                        # 点击第一个推荐地址
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_suggestion)
+                        time.sleep(0.3)
+                        first_suggestion.click()
+                        print(f"  ✅ 已选择推荐地址 (Google 将自动填充城市/州/邮编)")
+                        google_autofilled = True
+                        time.sleep(2.5)  # 增加等待时间，让 Google 完成自动填充
+                    else:
+                        # 如果没找到下拉，按下 ArrowDown + Enter 选择第一个
+                        try:
+                            ActionChains(driver).send_keys(Keys.ARROW_DOWN, Keys.ENTER).perform()
+                            print(f"  ✅ 通过键盘选择第一个推荐地址 (Google 将自动填充城市/州/邮编)")
+                            google_autofilled = True
+                            time.sleep(2.5)  # 增加等待时间，让 Google 完成自动填充
+                        except:
+                            # 最后的兜底：关闭可能出现的自动完成下拉
+                            try:
+                                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                            except:
+                                pass
+                except Exception as e:
+                    print(f"  ⚠️ 地址自动选择失败: {e}")
+                    try:
+                        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    except:
+                        pass
             
-            # 邮编字段
-            zip_keywords = ['邮编', 'zip', 'postal', 'postcode', '邮政编码']
-            if smart_fill_field(zip_keywords, billing_info["zip"], "邮编"):
-                filled_any = True
-                time.sleep(2)  # 等待可能的二级字段加载
+            # 如果 Google 已经自动填充，跳过手动填写邮编/城市/州
+            if google_autofilled:
+                print("  ℹ️ 跳过邮编/城市/州手动填写（Google 已自动填充）")
+                return filled_any
+            
+            # 邮编字段 - 暂时禁用
+            # zip_keywords = ['邮编', 'zip', 'postal', 'postcode', '邮政编码']
+            # if smart_fill_field(zip_keywords, billing_info["zip"], "邮编"):
+            #     filled_any = True
+            #     time.sleep(3)  # 增加等待时间，让页面响应和加载
+            print("  ⏭️  邮编字段已跳过（测试模式）")
             
             # 城市字段
             city_keywords = ['城市', 'city', 'locality', '市']
             if smart_fill_field(city_keywords, billing_info["city"], "城市"):
                 filled_any = True
+                time.sleep(1)  # 等待页面响应
             
             # 州/省字段
             state_keywords = ['州', 'state', 'province', 'region', '省']
@@ -1271,7 +1375,13 @@ def subscribe_plus_trial(driver):
                         state_el.send_keys(billing_info["state"])
                         state_el.send_keys(Keys.ENTER)
                     else:
+                        # 多步骤清空州字段
+                        state_el.send_keys(Keys.CONTROL + "a")
+                        time.sleep(0.1)
+                        state_el.send_keys(Keys.DELETE)
+                        time.sleep(0.1)
                         state_el.clear()
+                        time.sleep(0.2)
                         type_slowly(state_el, billing_info["state"])
                         time.sleep(0.3)
                         state_el.send_keys(Keys.ARROW_DOWN)
@@ -1284,8 +1394,10 @@ def subscribe_plus_trial(driver):
             return filled_any or True  # 即使没填也返回 True 继续执行
 
         print("🏠 寻找并填写地址...")
+        # 增加等待时间，让页面完全加载
+        time.sleep(2)
         run_in_all_frames("填写地址", fill_address)
-        time.sleep(1)
+        time.sleep(2)  # 增加等待，让地址自动完成有时间加载
 
         # ============== 4. 填写信用卡 ==============
         print("💳 正在填写信用卡信息...")
@@ -1414,47 +1526,11 @@ def subscribe_plus_trial(driver):
         filled_card_fields = try_fill_card_in_frames()
         print(f"  📊 共填写了 {filled_card_fields} 个信用卡字段")
         
-        # 如果没有填写成功，尝试传统选择器
+        # 智能填写未完全成功就继续尝试，不切换传统选择器
         if filled_card_fields < 3:
-            print("  ⚠️ 智能填写未完全成功，尝试传统选择器...")
-            driver.switch_to.default_content()
-            
-            # 卡号
-            if filled_card_fields < 1 and not handle_stripe_input(
-                driver, '卡号',
-                'input[name="cardnumber"], input[name="number"], input[id="Field-numberInput"], '
-                'input[data-elements-stable-field-name="cardNumber"], '
-                'input[placeholder*="Card number"], input[placeholder*="0000"], input[placeholder*="卡号"], '
-                'input[placeholder*="1234 1234 1234"], input[aria-label*="卡号"], input[autocomplete="cc-number"]',
-                card["number"]
-            ):
-                print("  ❌ 卡号输入失败")
-            
-            time.sleep(1)
-            
-            # 有效期
-            if filled_card_fields < 2 and not handle_stripe_input(
-                driver, '有效期',
-                'input[name="exp-date"], input[name="expirationDate"], input[name="expiry"], '
-                'input[id="cardExpiry"], input[id="Field-expiryInput"], '
-                'input[data-elements-stable-field-name="cardExpiry"], '
-                'input[placeholder="MM / YY"], input[placeholder*="月/年"], '
-                'input[placeholder*="有效期"], input[aria-label*="有效期"], input[autocomplete="cc-exp"]',
-                card["expiry"]
-            ):
-                print("  ❌ 有效期输入失败")
-            
-            time.sleep(1)
-            
-            # CVC
-            if filled_card_fields < 3 and not handle_stripe_input(
-                driver, 'CVC',
-                'input[name="cvc"], input[name="securityCode"], input[id="cardCvc"], input[id="Field-cvcInput"], '
-                'input[data-elements-stable-field-name="cardCvc"], '
-                'input[placeholder="CVC"], input[placeholder*="安全码"], input[aria-label*="安全码"]',
-                card["cvc"]
-            ):
-                print("  ❌ CVC 输入失败")
+            print("  ⚠️ 智能填写未完全成功，继续尝试智能填写方式...")
+            # 移除了切换到传统选择器的逻辑
+            # 系统将在后续提交时继续使用智能填写方式
 
         time.sleep(2)
         
@@ -1526,6 +1602,7 @@ def subscribe_plus_trial(driver):
 
                 # 2. 检查是否有 '该字段不完整' / 'Incomplete field'
                 # 需要遍历 iframe 检查
+                time.sleep(1.5)  # 增加等待时间，让页面完全加载后再检查错误
                 has_error = False
                 driver.switch_to.default_content()
                 frames = driver.find_elements(By.TAG_NAME, "iframe")
@@ -1543,6 +1620,7 @@ def subscribe_plus_trial(driver):
                     
                     if errors:
                         print(f"  ⚠️ 发现 {len(errors)} 个未完成字段，正在补全...")
+                        time.sleep(1)  # 增加等待，让页面稳定后再补填
                         has_error = True
                         
                         # --- US 补全策略 ---
@@ -1551,49 +1629,79 @@ def subscribe_plus_trial(driver):
                         try:
                              line1_inputs = driver.find_elements(By.CSS_SELECTOR, '#Field-addressLine1Input, input[name="addressLine1"], input[placeholder="地址第 1 行"], input[placeholder="Address line 1"]')
                              for el in line1_inputs:
-                                 if el.is_displayed() and not el.get_attribute('value'):
-                                      print(f"    -> 补填 Address Line 1 ({billing_info['address1']})")
-                                      el.clear()
-                                      type_slowly(el, billing_info['address1'])
-                                      # 有时候填完需要回车
-                                      try: el.send_keys(Keys.ENTER)
-                                      except: pass
+                                 if el.is_displayed():
+                                      current_value = el.get_attribute('value') or ""
+                                      if not current_value or current_value != billing_info['address1']:
+                                           print(f"    -> 补填 Address Line 1 ({billing_info['address1']})")
+                                           el.send_keys(Keys.CONTROL + "a")
+                                           time.sleep(0.1)
+                                           el.send_keys(Keys.DELETE)
+                                           time.sleep(0.1)
+                                           el.clear()
+                                           time.sleep(0.2)
+                                           type_slowly(el, billing_info['address1'])
+                                           try: el.send_keys(Keys.ENTER)
+                                           except: pass
+                                           time.sleep(1)  # 等待地址填充效果
                         except Exception as e:
                             print(f"    debug: 补填 address1 异常 {e}")
 
                         # 2. 检查州/State
+                        time.sleep(0.8)  # 等待页面响应
                         state_inputs = driver.find_elements(By.CSS_SELECTOR, '#Field-administrativeAreaInput, select[name="state"], input[name="state"]')
                         for el in state_inputs:
                             try:
                                 if el.is_displayed():
-                                    print("    -> 补填 State (US 默认 New York)")
+                                    state_value = billing_info.get('state', 'New York')
+                                    print(f"    -> 补填 State ({state_value})")
                                     if el.tag_name == 'select':
-                                        el.send_keys("New York")
+                                        el.send_keys(state_value)
                                         el.send_keys(Keys.ENTER)
                                     else:
-                                        el.send_keys("New York")
+                                        el.send_keys(Keys.CONTROL + "a")
+                                        time.sleep(0.1)
+                                        el.send_keys(Keys.DELETE)
+                                        time.sleep(0.1)
+                                        el.clear()
+                                        time.sleep(0.2)
+                                        type_slowly(el, state_value)
+                                        time.sleep(0.3)
                                         el.send_keys(Keys.ARROW_DOWN)
                                         el.send_keys(Keys.ENTER)
                             except: pass
 
-                        # 检查邮编
-                        zip_inputs = driver.find_elements(By.CSS_SELECTOR, '#Field-postalCodeInput, input[name="postalCode"]')
-                        for el in zip_inputs:
-                            try:
-                                if el.is_displayed() and not el.get_attribute('value'):
-                                    print("    -> 补填 Zip (10001)")
-                                    el.clear()
-                                    type_slowly(el, "10001")
-                            except: pass
-                            
+                        # 检查邮编 - 暂时禁用
+                        # time.sleep(0.8)  # 等待页面响应
+                        # zip_inputs = driver.find_elements(By.CSS_SELECTOR, '#Field-postalCodeInput, input[name="postalCode"]')
+                        # for el in zip_inputs:
+                        #     try:
+                        #         if el.is_displayed():
+                        #             current_value = el.get_attribute('value') or ""
+                        #             # 只有在字段为空或者值不正确时才补填
+                        #             expected_zip = billing_info.get('zip', '10001')
+                        #             if not current_value or current_value != expected_zip:
+                        #                 print(f"    -> 补填 Zip ({expected_zip})")
+                        #                 # 多步骤清空，确保彻底移除已有内容
+                        #                 el.send_keys(Keys.CONTROL + "a")  # 全选
+                        #                 time.sleep(0.1)
+                        #                 el.send_keys(Keys.DELETE)  # 删除
+                        #                 time.sleep(0.1)
+                        #                 el.clear()  # 再清一遍
+                        #                 time.sleep(0.2)
+                        #                 type_slowly(el, expected_zip)
+                        #                 time.sleep(0.8)  # 等待邮编填充效果
+                        #     except: pass
+                        
                         # 检查城市
+                        time.sleep(0.8)  # 等待页面响应
                         city_inputs = driver.find_elements(By.CSS_SELECTOR, '#Field-localityInput, input[name="city"]')
                         for el in city_inputs:
                             try:
                                 if el.is_displayed() and not el.get_attribute('value'):
-                                    print("    -> 补填 City (New York)")
+                                    city_value = billing_info.get('city', 'New York')
+                                    print(f"    -> 补填 City ({city_value})")
                                     el.clear()
-                                    type_slowly(el, "New York")
+                                    type_slowly(el, city_value)
                             except: pass
                             
                     driver.switch_to.default_content()

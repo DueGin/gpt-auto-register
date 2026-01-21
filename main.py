@@ -189,8 +189,29 @@ def register_one_account(monitor_callback=None, account_type: str = "GPT"):
     
     finally:
         if driver:
-            print("🔒 正在关闭浏览器...")
-            driver.quit()
+            print("\n" + "="*50)
+            print("✅ 注册流程已完成")
+            print("💡 请手动检查浏览器，确认注册结果")
+            print("🔴 完成检查后，请关闭浏览器窗口，程序将继续下一个注册")
+            print("="*50)
+            
+            # 等待用户手动关闭浏览器
+            try:
+                while True:
+                    try:
+                        # 检查浏览器是否还在运行
+                        driver.current_url
+                        time.sleep(1)
+                    except:
+                        # 浏览器已被关闭
+                        print("✅ 检测到浏览器已关闭，继续下一个任务...")
+                        break
+            except KeyboardInterrupt:
+                print("\n🛑 用户中断")
+                try:
+                    driver.quit()
+                except:
+                    pass
     
     return email, password, success
     

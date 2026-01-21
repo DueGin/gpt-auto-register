@@ -7,6 +7,7 @@ import random
 import string
 import csv
 import os
+from pathlib import Path
 import re
 import time
 import json
@@ -190,7 +191,7 @@ def update_account_status(
     email: str,
     new_status: str,
     password: str = None,
-    record_id: str | None = None,
+    record_id = None,
 ):
     """
     专门用于更新账号状态的快捷函数
@@ -385,12 +386,78 @@ def generate_us_address():
     return addr
 
 
+def load_scraped_address_from_file(dir_path: str = "美国地址爬虫_副本", pattern: str = "basic_addresses_*.json"):
+    """
+    从爬虫生成的 JSON 文件中取出一个地址并移除已使用项。
+
+    默认目录: 美国地址爬虫_副本/basic_addresses_*.json
+    取出顺序: 逐个文件按名称排序，从文件头部弹出第一条，写回剩余；如果文件为空则删除。
+
+    返回:
+        dict | None: {name, address1, city, state, zip}
+    """
+    dir_p = Path(dir_path)
+    if not dir_p.exists():
+        return None
+
+    files = sorted(dir_p.glob(pattern))
+    for fp in files:
+        try:
+            with fp.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        if not isinstance(data, list) or not data:
+            try:
+                fp.unlink()
+            except Exception:
+                pass
+            continue
+
+        # 弹出第一条记录
+        record = data.pop(0)
+
+        # 写回剩余数据，空则删除文件
+        try:
+            if data:
+                with fp.open("w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            else:
+                fp.unlink()
+        except Exception:
+            pass
+
+        # 兼容字段名映射
+        def _get(*keys):
+            for k in keys:
+                if k in record and record[k]:
+                    return str(record[k]).strip()
+            return ""
+
+        mapped = {
+            "name": _get("name", "全名"),
+            "address1": _get("address1", "街道", "地址"),
+            "city": _get("city", "城市"),
+            "state": _get("state", "州", "州全称"),
+            "zip": _get("zip", "邮编"),
+        }
+
+        required = ["address1", "city", "state", "zip"]
+        if all(mapped.get(k) for k in required):
+            print(f"✅ 从文件 {fp.name} 取出地址: {mapped['address1']}, {mapped['city']} {mapped['state']} {mapped['zip']}")
+            return mapped
+
+    return None
+
+
 def fetch_meiguodizhi_address(driver=None):
     """
-    从 meiguodizhi.com API 获取随机美国地址和姓名
+    从 meiguodizhi.com 获取随机美国地址和姓名
+    先尝试 API，失败则使用网页解析
     
     参数:
-        driver: 可选的 Selenium WebDriver 实例（该函数使用 requests 库直接调用 API）
+        driver: 可选的 Selenium WebDriver 实例（用于网页解析）
     
     返回:
         dict: 包含姓名和地址的字典，失败时返回 None
@@ -402,56 +469,131 @@ def fetch_meiguodizhi_address(driver=None):
                   'zip': '邮编'
               }
     """
+    # 先尝试 API 方式
     try:
-        print("🌐 正在从 meiguodizhi.com API 获取随机美国地址...")
-        
         import requests
         import json
         
-        # meiguodizhi.com API 端点（添加时间戳参数避免缓存）
+        print("🌐 正在从 meiguodizhi.com API 获取随机美国地址...")
+        
         timestamp = int(time.time() * 1000)
         api_url = f'https://www.meiguodizhi.com/api/v1/dz?t={timestamp}'
         
-        # 添加 headers 模拟浏览器请求
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
             'Referer': 'https://www.meiguodizhi.com/'
         }
         
-        # 发送请求
         response = requests.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # 解析 JSON 响应
         data = response.json()
         
-        # 检查响应状态
-        if data.get('status') != 'ok' or not data.get('address'):
-            print(f"⚠️ API 返回异常: {data.get('status')}")
-            return None
+        if data.get('status') == 'ok' and data.get('address'):
+            address_info = data['address']
+            
+            address_data = {
+                'name': address_info.get('Full_Name', '').strip(),
+                'address1': address_info.get('Address', '').strip(),
+                'city': address_info.get('City', '').strip(),
+                'state': address_info.get('State', '').strip(),
+                'zip': address_info.get('Zip_Code', '').strip()
+            }
+            
+            required_fields = ['name', 'address1', 'city', 'state', 'zip']
+            if all(field in address_data and address_data[field] for field in required_fields):
+                print(f"✅ 成功从 meiguodizhi.com API 获取地址:")
+                print(f"   姓名: {address_data['name']}")
+                print(f"   地址: {address_data['address1']}, {address_data['city']}, {address_data['state']} {address_data['zip']}")
+                return address_data
+        else:
+            print(f"⚠️ API 返回异常: {data.get('status')}，尝试网页解析...")
+    except Exception as e:
+        print(f"⚠️ API 方式失败: {e}，尝试网页解析...")
+    
+    # API 失败，尝试网页解析
+    try:
+        import requests
+        from bs4 import BeautifulSoup
         
-        address_info = data['address']
+        print("🌐 正在从 meiguodizhi.com 网页解析地址...")
         
-        # 提取需要的字段
-        address_data = {
-            'name': address_info.get('Full_Name', '').strip(),
-            'address1': address_info.get('Address', '').strip(),
-            'city': address_info.get('City', '').strip(),
-            'state': address_info.get('State', '').strip(),  # 使用州缩写 (如 KY)
-            'zip': address_info.get('Zip_Code', '').strip()
+        url = 'https://www.meiguodizhi.com/'
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         }
         
-        # 验证必要字段
-        required_fields = ['name', 'address1', 'city', 'state', 'zip']
-        if all(field in address_data and address_data[field] for field in required_fields):
-            print(f"✅ 成功从 meiguodizhi.com 获取地址:")
-            print(f"   姓名: {address_data['name']}")
-            print(f"   地址: {address_data['address1']}, {address_data['city']}, {address_data['state']} {address_data['zip']}")
-            return address_data
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 查找地址信息（根据网页结构解析）
+        address_data = {}
+        
+        # 尝试查找包含地址的表格或列表
+        # 方法1: 查找所有文本，匹配地址格式
+        text_content = soup.get_text()
+        
+        # 尝试查找特定的元素
+        # 根据实际网页结构调整选择器
+        name_elem = soup.find(text=lambda t: t and '姓名' in t or 'Full Name' in t)
+        address_elem = soup.find(text=lambda t: t and '地址' in t or 'Address' in t)
+        
+        # 如果能找到结构化数据
+        if BS4_AVAILABLE:
+            # 查找所有的行或项目
+            rows = soup.find_all(['tr', 'div', 'li'])
+            
+            for row in rows:
+                text = row.get_text(strip=True)
+                
+                # 匹配姓名
+                if ('姓名' in text or 'Full Name' in text or 'Name' in text) and not address_data.get('name'):
+                    # 提取姓名值
+                    parts = text.split(':', 1) if ':' in text else text.split('：', 1)
+                    if len(parts) == 2:
+                        address_data['name'] = parts[1].strip()
+                
+                # 匹配地址
+                if ('地址' in text or 'Address' in text or 'Street' in text) and not address_data.get('address1'):
+                    parts = text.split(':', 1) if ':' in text else text.split('：', 1)
+                    if len(parts) == 2:
+                        address_data['address1'] = parts[1].strip()
+                
+                # 匹配城市
+                if ('城市' in text or 'City' in text) and not address_data.get('city'):
+                    parts = text.split(':', 1) if ':' in text else text.split('：', 1)
+                    if len(parts) == 2:
+                        address_data['city'] = parts[1].strip()
+                
+                # 匹配州
+                if ('州' in text or 'State' in text) and not address_data.get('state'):
+                    parts = text.split(':', 1) if ':' in text else text.split('：', 1)
+                    if len(parts) == 2:
+                        address_data['state'] = parts[1].strip()
+                
+                # 匹配邮编
+                if ('邮编' in text or 'Zip' in text or 'Postal' in text) and not address_data.get('zip'):
+                    parts = text.split(':', 1) if ':' in text else text.split('：', 1)
+                    if len(parts) == 2:
+                        address_data['zip'] = parts[1].strip()
+            
+            # 验证是否获取到完整数据
+            required_fields = ['name', 'address1', 'city', 'state', 'zip']
+            if all(field in address_data and address_data[field] for field in required_fields):
+                print(f"✅ 成功从 meiguodizhi.com 网页解析地址:")
+                print(f"   姓名: {address_data['name']}")
+                print(f"   地址: {address_data['address1']}, {address_data['city']}, {address_data['state']} {address_data['zip']}")
+                return address_data
+            else:
+                print(f"⚠️ 网页解析获取数据不完整: {address_data}")
+                return None
         else:
-            print("⚠️ 从 meiguodizhi.com 提取地址数据不完整，将使用本地生成")
-            print(f"   已提取的数据: {address_data}")
+            print("❌ BeautifulSoup 未安装，无法解析网页")
             return None
             
     except requests.exceptions.Timeout:
@@ -459,9 +601,6 @@ def fetch_meiguodizhi_address(driver=None):
         return None
     except requests.exceptions.ConnectionError:
         print("❌ 无法连接到 meiguodizhi.com（网络错误或网站不可用）")
-        return None
-    except json.JSONDecodeError:
-        print("❌ 解析 meiguodizhi.com 响应失败（返回数据不是有效 JSON）")
         return None
     except Exception as e:
         print(f"❌ 从 meiguodizhi.com 获取地址失败: {e}")
@@ -483,6 +622,27 @@ def generate_billing_info(country="US", driver=None):
     
     # 1. 检查是否要使用 meiguodizhi.com 获取地址
     address_source = billing_cfg.get("address_source", "local")
+
+    if address_source == "scraped":
+        dir_path = billing_cfg.get("scraped_dir", "美国地址爬虫_副本")
+        addr = load_scraped_address_from_file(dir_path=dir_path)
+        if addr:
+            name = billing_cfg.get("name") or addr.get("name") or generate_random_name()
+            billing_info = {
+                "name": name,
+                "zip": addr["zip"],
+                "state": addr["state"],
+                "city": addr["city"],
+                "address1": addr["address1"],
+                "address2": "",
+                "country": billing_cfg.get("country", country).upper()
+            }
+            print("📄 使用本地爬取文件中的地址")
+            print(f"   姓名: {billing_info['name']}")
+            print(f"   地址: {billing_info['address1']}, {billing_info['city']}, {billing_info['state']} {billing_info['zip']}")
+            return billing_info
+        else:
+            print("⚠️ 本地爬取文件中没有可用地址，回退到其他来源")
     
     if address_source == "meiguodizhi":
         print("🌐 配置要求从 meiguodizhi.com 获取地址...")

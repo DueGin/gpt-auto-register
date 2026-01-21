@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 数据文件
+*.json
+*.csv
+*.xlsx
+!README*.json
+
+# 调试文件
+debug_*.py
+debug_*.html
+debug_*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 日志
+*.log
+
+# Selenium
+geckodriver.log
+chromedriver.log
