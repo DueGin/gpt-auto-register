@@ -12,6 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException
 from bs4 import BeautifulSoup
 import json
 import time
@@ -38,6 +39,7 @@ class AddressScraper:
             return
             
         chrome_options = Options()
+        chrome_options.page_load_strategy = "eager"
         if self.headless:
             chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
@@ -48,6 +50,8 @@ class AddressScraper:
         
         try:
             self.driver = webdriver.Chrome(options=chrome_options)
+            self.driver.set_page_load_timeout(20)
+            self.driver.set_script_timeout(20)
             print("Chrome驱动初始化成功")
         except Exception as e:
             print(f"Chrome驱动初始化失败: {e}")
@@ -63,7 +67,10 @@ class AddressScraper:
     def fetch_page(self, url):
         """获取网页并等待JavaScript加载"""
         try:
-            self.driver.get(url)
+            try:
+                self.driver.get(url)
+            except TimeoutException:
+                print("页面加载超时，尝试继续解析已加载内容")
             # 等待数据加载完成 - 等待全名字段有值
             wait = WebDriverWait(self.driver, 10)
             # 等待元素存在
