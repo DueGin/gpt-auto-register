@@ -350,10 +350,6 @@ def create_temp_email():
             actual_email = result.get('address')
 
             if jwt_token and actual_email:
-                # 强制使用本地配置的域名：如果 Worker 返回的邮箱域名与本地 config 不一致，则替换
-                if '@' in actual_email:
-                    local_part = actual_email.split('@')[0]
-                    actual_email = f"{local_part}@{EMAIL_DOMAIN}"
                 print(f"✅ 邮箱创建成功: {actual_email}")
                 return actual_email, jwt_token
             elif jwt_token:
@@ -551,8 +547,13 @@ def _parse_email_bytes(raw_bytes: bytes):
         return {'subject': '', 'body': '', 'sender': ''}
 
 
-def _extract_code_from_raw_email(raw_bytes: bytes):
-    """从原始邮件字节中提取验证码（针对 QQ 邮箱读取）"""
+def _extract_code_from_raw_email(raw_bytes: bytes, target_email: str = None):
+    """从原始邮件字节中提取验证码（针对 QQ 邮箱读取）
+
+    参数:
+        raw_bytes: 原始邮件字节
+        target_email: 可选，目标收件人邮箱地址。如果提供，只匹配发给该地址的邮件
+    """
     parsed = _parse_email_bytes(raw_bytes)
     subject = parsed['subject']
     sender = parsed['sender']
@@ -563,6 +564,25 @@ def _extract_code_from_raw_email(raw_bytes: bytes):
     is_openai_mail = ('openai' in sender_lower) or ('chatgpt' in subject_lower)
     if not is_openai_mail:
         return None
+
+    # 如果提供了 target_email，检查收件人是否匹配
+    if target_email:
+        try:
+            msg_obj = email.message_from_bytes(raw_bytes, policy=policy.default)
+            to_header = msg_obj.get('To', '') or ''
+            cc_header = msg_obj.get('Cc', '') or ''
+            delivered_to = msg_obj.get('Delivered-To', '') or ''
+            # Cloudflare 转发时可能在 X-Forwarded-To 或 X-Original-To 中保留原始收件人
+            x_forwarded_to = msg_obj.get('X-Forwarded-To', '') or ''
+            x_original_to = msg_obj.get('X-Original-To', '') or ''
+            all_recipients = f"{to_header} {cc_header} {delivered_to} {x_forwarded_to} {x_original_to}".lower()
+
+            target_lower = target_email.lower()
+            if target_lower not in all_recipients:
+                return None
+        except Exception:
+            # 解析失败时不过滤，尝试提取验证码
+            pass
 
     code = extract_verification_code(subject)
     if code:
@@ -578,8 +598,13 @@ def _extract_code_from_raw_email(raw_bytes: bytes):
 # QQ 邮箱方案（旧方案，仅 Cloudflare 模式下使用）
 # ==============================================================
 
-def _fetch_code_via_imap(max_messages: int = 15):
-    """通过 IMAP 轮询 QQ 邮箱"""
+def _fetch_code_via_imap(target_email: str = None, max_messages: int = 15):
+    """通过 IMAP 轮询 QQ 邮箱
+
+    参数:
+        target_email: 目标收件人邮箱地址，用于匹配转发邮件的原始收件人
+        max_messages: 最多检查的邮件数
+    """
     client = None
     try:
         client = imaplib.IMAP4_SSL(QQ_IMAP_HOST, QQ_IMAP_PORT)
@@ -597,7 +622,7 @@ def _fetch_code_via_imap(max_messages: int = 15):
                 continue
             for part in msg_data:
                 if isinstance(part, tuple):
-                    code = _extract_code_from_raw_email(part[1])
+                    code = _extract_code_from_raw_email(part[1], target_email=target_email)
                     if code:
                         return code
     except Exception as e:
@@ -611,8 +636,13 @@ def _fetch_code_via_imap(max_messages: int = 15):
     return None
 
 
-def _fetch_code_via_pop(max_messages: int = 10):
-    """通过 POP 轮询 QQ 邮箱"""
+def _fetch_code_via_pop(target_email: str = None, max_messages: int = 10):
+    """通过 POP 轮询 QQ 邮箱
+
+    参数:
+        target_email: 目标收件人邮箱地址，用于匹配转发邮件的原始收件人
+        max_messages: 最多检查的邮件数
+    """
     client = None
     try:
         client = poplib.POP3_SSL(QQ_POP_HOST, QQ_POP_PORT, timeout=HTTP_TIMEOUT)
@@ -627,7 +657,7 @@ def _fetch_code_via_pop(max_messages: int = 10):
         for i in range(total_messages, start - 1, -1):
             _, lines, _ = client.retr(i)
             raw_email = b"\r\n".join(lines)
-            code = _extract_code_from_raw_email(raw_email)
+            code = _extract_code_from_raw_email(raw_email, target_email=target_email)
             if code:
                 return code
     except Exception as e:
@@ -641,9 +671,13 @@ def _fetch_code_via_pop(max_messages: int = 10):
     return None
 
 
-def wait_for_verification_email_via_qq(timeout: int = None):
+def wait_for_verification_email_via_qq(timeout: int = None, target_email: str = None):
     """
     使用 QQ 邮箱轮询验证码（适用于 Cloudflare 路由到 QQ 的场景）
+
+    参数:
+        timeout: 超时时间（秒）
+        target_email: 目标收件人邮箱地址，用于匹配转发邮件的原始收件人
 
     返回:
         str: 验证码，未找到返回 None
@@ -651,14 +685,17 @@ def wait_for_verification_email_via_qq(timeout: int = None):
     if timeout is None:
         timeout = EMAIL_WAIT_TIMEOUT
 
-    print(f"⏳ 正在从 QQ 邮箱等待验证邮件（最长 {timeout} 秒）...")
+    if target_email:
+        print(f"⏳ 正在从 QQ 邮箱等待验证邮件（目标: {target_email}，最长 {timeout} 秒）...")
+    else:
+        print(f"⏳ 正在从 QQ 邮箱等待验证邮件（最长 {timeout} 秒）...")
     start_time = time.time()
 
     while time.time() - start_time < timeout:
         if QQ_EMAIL_PROTOCOL.startswith('pop'):
-            code = _fetch_code_via_pop()
+            code = _fetch_code_via_pop(target_email=target_email)
         else:
-            code = _fetch_code_via_imap()
+            code = _fetch_code_via_imap(target_email=target_email)
 
         if code:
             return code
@@ -705,7 +742,7 @@ def wait_for_verification_email(jwt_token=None, timeout: int = None, target_emai
 
     # Cloudflare 方案：优先使用 QQ 邮箱轮询
     if QQ_EMAIL_ENABLED and QQ_EMAIL_ADDRESS and QQ_EMAIL_AUTH_CODE:
-        code = wait_for_verification_email_via_qq(timeout)
+        code = wait_for_verification_email_via_qq(timeout, target_email=target_email)
         if code or not jwt_token:
             return code
         print("⚠️ QQ 邮箱未获取到验证码，尝试使用 Cloudflare 临时邮箱...")
