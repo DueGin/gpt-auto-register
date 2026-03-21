@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"/Users/uq/Downloads/gpt-auto-register \\(2\\)/\")",
+      "Bash(/usr/bin/python3 -c \"import py_compile; py_compile.compile\\(''/Users/uq/Downloads/gpt-auto-register \\(2\\)/main.py'', doraise=True\\); print\\(''✅ 语法检查通过''\\)\")",
+      "Bash(hexdump -C \"/Users/uq/Downloads/gpt-auto-register \\(2\\)/main.py\")",
+      "Bash(/usr/bin/python3 -c \"import py_compile; py_compile.compile\\(''/Users/uq/Downloads/gpt-auto-register \\(2\\)/main.py'', doraise=True\\); print\\(''syntax OK''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python3 -c \":*)"
+    ]
+  }
+}

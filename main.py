@@ -1,28 +1,18 @@
 """
-ChatGPT 账号自动注册脚本
-主程序入口
-
-使用方法:
-    1. 修改 config.py 中的配置
-    2. 运行: python main.py
-
-依赖安装:
-    pip install undetected-chromedriver selenium requests
-
-功能:
-    - 自动创建临时邮箱（基于 cloudflare_temp_email）
-    - 自动完成 ChatGPT 注册流程
-    - 自动提取验证码
-    - 批量注册支持
+ChatGPT auto-register script
+支持串行和并发注册模式
 """
 
 import time
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
     TOTAL_ACCOUNTS,
     BATCH_INTERVAL_MIN,
     BATCH_INTERVAL_MAX,
+    BATCH_CONCURRENT,
     CREDIT_CARD_INFO
 )
 from utils import generate_random_password, save_to_txt, update_account_status
@@ -37,242 +27,355 @@ from browser import (
     cancel_subscription
 )
 
+# 单个账号注册的最大允许时间
+REGISTER_TIMEOUT = 300  # 5 min
+# 等待邮箱验证码的最短时间
+MIN_VERIFICATION_WAIT_SECONDS = 40
 
-def register_one_account(monitor_callback=None, account_type: str = "GPT"):
+
+class RegisterTimeoutError(Exception):
+    """single register timeout"""
+    pass
+
+
+def register_one_account(monitor_callback=None, account_type: str = "GPT", worker_id: int = 0):
     """
-    注册单个账号
-    :param monitor_callback: 回调函数 func(driver, step_name)，用于截图和中断检查
-    
-    返回:
-        tuple: (邮箱, 密码, 是否成功)
+    register one account
+    :param monitor_callback: callback func(driver, step_name)
+    :param account_type: 账号类型标记
+    :param worker_id: 并发 worker 编号（用于日志区分）
+
+    Returns:
+        tuple: (email, password, success)
     """
+    tag = f"[W{worker_id}]" if worker_id > 0 else ""
     driver = None
     email = None
     password = None
+    master_account = None  # 2925 方案下保存主邮箱信息
     bitable_record_id = None
     success = False
-    
-    # 辅助函数：执行回调
+    plus_subscribed = False
+    register_start_time = time.time()
+
     def _report(step_name):
         if monitor_callback and driver:
             monitor_callback(driver, step_name)
 
+    def _check_timeout(step_name=""):
+        elapsed = time.time() - register_start_time
+        if elapsed >= REGISTER_TIMEOUT:
+            raise RegisterTimeoutError(
+                f"timeout ({int(elapsed)}s, limit {REGISTER_TIMEOUT}s), step: {step_name}"
+            )
+
+    def _wait_for_manual_close():
+        try:
+            while True:
+                try:
+                    driver.current_url
+                    time.sleep(1)
+                except:
+                    print("detected browser closed, continue...")
+                    break
+        except KeyboardInterrupt:
+            print("\nuser interrupted")
+            try:
+                driver.quit()
+            except:
+                pass
+
     try:
-        # 1. 创建临时邮箱
-        print("📧 正在创建临时邮箱...")
+        # 1. create temp email
+        print(f"{tag} creating temp email...")
         email, jwt_token = create_temp_email()
+        # 2925 方案下 jwt_token 实际是 account dict，保存供后续使用
+        if isinstance(jwt_token, dict):
+            master_account = jwt_token
+            jwt_token = None
         if not email:
-            print("❌ 创建邮箱失败，终止注册")
+            print(f"{tag} create email failed")
             return None, None, False
-        
-        # 2. 生成随机密码
+        _check_timeout("create_email")
+
+        # 2. generate password
         password = generate_random_password()
-        
-        # 3. 初始化浏览器
+
+        # 3. init browser
         driver = create_driver(headless=False)
         _report("init_browser")
-        
-        # 4. 打开注册页面
+        _check_timeout("init_browser")
+
+        # 4. open signup page
         url = "https://chat.openai.com/chat"
-        print(f"🌐 正在打开 {url}...")
+        print(f"{tag} opening {url}...")
         driver.get(url)
         time.sleep(3)
         _report("open_page")
-        
-        # 5. 填写注册表单（邮箱和密码）
+        _check_timeout("open_page")
+
+        # 5. fill signup form
         if not fill_signup_form(driver, email, password):
-            print("❌ 填写注册表单失败")
+            print(f"{tag} fill signup form failed")
             return email, password, False
         _report("fill_form")
-        
-        # 6. 等待验证邮件
+        _check_timeout("fill_form")
+
+        # 6. wait for verification email (use remaining time as timeout)
         time.sleep(5)
-        verification_code = wait_for_verification_email(jwt_token)
-        
-        # 如果没有自动获取到验证码，提示手动输入
+        remaining = max(MIN_VERIFICATION_WAIT_SECONDS, int(REGISTER_TIMEOUT - (time.time() - register_start_time)))
+        verification_code = wait_for_verification_email(
+            jwt_token, timeout=remaining, target_email=email, master_account=master_account
+        )
+
         if not verification_code:
-            print("⚠️ 未自动获取验证码，尝试请求用户输入...")
-            # 可以在这里扩展手动输入回调，暂略
-            # verification_code = input("⌨️ 请手动输入验证码: ").strip()
-        
-        if not verification_code:
-            print("❌ 未获取到验证码，终止注册")
+            print(f"{tag} no verification code received")
             return email, password, False
-        
-        # 7. 输入验证码
+        _check_timeout("wait_verification")
+
+        # 7. enter verification code
         if not enter_verification_code(driver, verification_code):
-            print("❌ 输入验证码失败")
+            print(f"{tag} enter verification code failed")
             return email, password, False
         _report("enter_code")
-        
-        # 8. 填写个人资料
+        _check_timeout("enter_code")
+
+        # 8. fill profile
         if not fill_profile_info(driver):
-            print("❌ 填写个人资料失败")
+            print(f"{tag} fill profile failed")
             return email, password, False
         _report("fill_profile")
-        
-        # 9. 保存账号信息 (注册成功)
-        save_to_txt(email, password, "已注册")
+        _check_timeout("fill_profile")
+
+        # 9. save account info
+        save_to_txt(email, password, "registered")
         bitable_ok, bitable_record_id = write_account_to_bitable(
             email,
             password,
-            status="已注册",
+            status="registered",
             account_type=account_type,
         )
         if not bitable_ok:
-            print("⚠️ 飞书多维表格写入未成功（请检查 enabled/权限/app_token/table_id/字段名）")
-        
-        # 10. 完成注册
-        print("\n" + "=" * 50)
-        print("🎉 注册成功！")
-        print(f"   邮箱: {email}")
-        print(f"   密码: {password}")
+            print(f"{tag} feishu bitable write failed")
+
+        # 10. done
+        print(f"\n{tag} " + "=" * 50)
+        print(f"{tag} register success!")
+        print(f"{tag}    email: {email}")
+        print(f"{tag}    password: {password}")
+        elapsed = int(time.time() - register_start_time)
+        print(f"{tag}    time: {elapsed}s")
         print("=" * 50)
-        
+
         success = True
-        print("⏳ 等待页面稳定...")
-        time.sleep(5)
         _report("registered")
-        
-        # 11. 开通 Plus 试用
-        print("\n" + "-" * 30)
-        print("🚀 开始开通 Plus 试用")
-        print("-" * 30)
-        
+
         def _can_auto_subscribe(card_info):
             required = ("number", "expiry", "cvc")
             missing = [k for k in required if not card_info.get(k)]
             if missing:
-                print(f"⚠️ 未配置完整信用卡信息，跳过自动绑卡: {', '.join(missing)}")
+                print(f"no card info, skip auto subscribe: {', '.join(missing)}")
                 return False
             return True
 
         if _can_auto_subscribe(CREDIT_CARD_INFO):
+            _check_timeout("pre_plus")
+            print("waiting for page stable...")
+            time.sleep(5)
+
+            # 11. subscribe plus trial
+            print("\n" + "-" * 30)
+            print("start plus trial")
+            print("-" * 30)
+
             if subscribe_plus_trial(driver):
-                print("🎉 Plus 试用开通成功！")
-                update_account_status(email, "已开通Plus", record_id=bitable_record_id)
-                # 如果启用了飞书多维表格，会自动更新“兑换Plus时间”
+                plus_subscribed = True
+                print("plus trial success!")
+                update_account_status(email, "plus_subscribed", record_id=bitable_record_id)
                 _report("plus_subscribed")
-                
-                # 12. 取消订阅 (防止扣费)
+                _check_timeout("plus_subscribed")
+
+                # 12. cancel subscription
                 print("\n" + "-" * 30)
-                print("🛑 正在取消订阅...")
+                print("cancelling subscription...")
                 print("-" * 30)
-                
+
                 time.sleep(5)
                 if cancel_subscription(driver):
-                    print("🎉 订阅已成功取消，流程完美结束！")
-                    update_account_status(email, "已取消订阅")
+                    print("subscription cancelled!")
+                    update_account_status(email, "cancelled")
                     _report("subscription_cancelled")
                 else:
-                    print("⚠️ 订阅取消失败，请务必手动取消！")
-                    update_account_status(email, "取消订阅失败")
+                    print("cancel subscription failed, please cancel manually!")
+                    update_account_status(email, "cancel_failed")
                     _report("cancel_failed")
             else:
-                print("⚠️ Plus 试用开通失败")
-                update_account_status(email, "Plus开通失败")
+                print("plus trial failed")
+                update_account_status(email, "plus_failed")
                 _report("plus_failed")
-            
+
         success = True
-        time.sleep(5)
-        
-    except InterruptedError:
-        print("🛑 任务已被用户强制中断")
-        if email: update_account_status(email, "用户中断")
+        if plus_subscribed:
+            time.sleep(5)
+
+    except RegisterTimeoutError as e:
+        elapsed = int(time.time() - register_start_time)
+        print(f"\ntimeout ({elapsed}s), skip this account: {e}")
+        if email:
+            update_account_status(email, f"timeout({elapsed}s)")
         return email, password, False
-        
+
+    except InterruptedError:
+        print("user interrupted")
+        if email:
+            update_account_status(email, "interrupted")
+        return email, password, False
+
     except Exception as e:
-        print(f"❌ 发生错误: {e}")
-        # 即使出错也保存已有的账号信息（便于排查）
+        print(f"error: {e}")
         if email and password:
-            update_account_status(email, f"错误: {str(e)[:50]}")
-    
+            update_account_status(email, f"error: {str(e)[:50]}")
+
     finally:
         if driver:
-            print("\n" + "="*50)
-            print("✅ 注册流程已完成")
-            print("💡 请手动检查浏览器，确认注册结果")
-            print("🔴 完成检查后，请关闭浏览器窗口，程序将继续下一个注册")
-            print("="*50)
-            
-            # 等待用户手动关闭浏览器
-            try:
-                while True:
-                    try:
-                        # 检查浏览器是否还在运行
-                        driver.current_url
-                        time.sleep(1)
-                    except:
-                        # 浏览器已被关闭
-                        print("✅ 检测到浏览器已关闭，继续下一个任务...")
-                        break
-            except KeyboardInterrupt:
-                print("\n🛑 用户中断")
+            if plus_subscribed:
+                print("\n" + "=" * 50)
+                print("register done")
+                print("please check browser, close window to continue")
+                print("=" * 50)
+                _wait_for_manual_close()
+            elif success:
+                print("\n" + "=" * 50)
+                print("register done (no plus), closing browser")
+                print("=" * 50)
                 try:
                     driver.quit()
                 except:
                     pass
-    
-    return email, password, success
-    
+            else:
+                # timeout or failed, close browser directly
+                print("closing browser, preparing next register...")
+                try:
+                    driver.quit()
+                except:
+                    pass
 
+    return email, password, success
+
+
+def _run_one_task(task_id, total, worker_id):
+    """并发注册的单个任务（在线程池中运行）"""
+    print(f"\n[W{worker_id}] " + "#" * 50)
+    print(f"[W{worker_id}] registering task {task_id}/{total}")
+    print(f"[W{worker_id}] " + "#" * 50 + "\n")
+
+    email, password, success = register_one_account(worker_id=worker_id)
+    return task_id, email, password, success
 
 
 def run_batch():
     """
-    批量注册账号
+    batch register accounts
+    支持并发模式：concurrent > 1 时使用线程池同时开多个浏览器
     """
+    concurrent = max(1, BATCH_CONCURRENT)
+
     print("\n" + "=" * 60)
-    print(f"🚀 开始批量注册，目标数量: {TOTAL_ACCOUNTS}")
+    print(f"start batch register, target: {TOTAL_ACCOUNTS}, concurrent: {concurrent}")
     print("=" * 60 + "\n")
 
-    print("\n⚠️  免责声明：本项目仅供学习研究使用。请勿用于商业用途或违规操作。")
-    print("⚠️  使用者需自行承担因违规使用导致的一切后果。\n")
     time.sleep(2)
-    
+
     success_count = 0
     fail_count = 0
     registered_accounts = []
-    
-    for i in range(TOTAL_ACCOUNTS):
-        print("\n" + "#" * 60)
-        print(f"📝 正在注册第 {i + 1}/{TOTAL_ACCOUNTS} 个账号")
-        print("#" * 60 + "\n")
-        
-        email, password, success = register_one_account()
-        
-        if success:
-            success_count += 1
-            registered_accounts.append((email, password))
-        else:
-            fail_count += 1
-        
-        # 显示进度
-        print("\n" + "-" * 40)
-        print(f"📊 当前进度: {i + 1}/{TOTAL_ACCOUNTS}")
-        print(f"   ✅ 成功: {success_count}")
-        print(f"   ❌ 失败: {fail_count}")
-        print("-" * 40)
-        
-        # 如果还有下一个，等待随机时间
-        if i < TOTAL_ACCOUNTS - 1:
-            wait_time = random.randint(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX)
-            print(f"\n⏳ 等待 {wait_time} 秒后继续下一个注册...")
-            time.sleep(wait_time)
-    
-    # 最终统计
+
+    if concurrent <= 1:
+        # ========== 串行模式（原逻辑） ==========
+        for i in range(TOTAL_ACCOUNTS):
+            print("\n" + "#" * 60)
+            print(f"registering {i + 1}/{TOTAL_ACCOUNTS}")
+            print("#" * 60 + "\n")
+
+            email, password, success = register_one_account()
+
+            if success:
+                success_count += 1
+                registered_accounts.append((email, password))
+            else:
+                fail_count += 1
+
+            # show progress
+            print("\n" + "-" * 40)
+            print(f"progress: {i + 1}/{TOTAL_ACCOUNTS}")
+            print(f"   success: {success_count}")
+            print(f"   failed: {fail_count}")
+            print("-" * 40)
+
+            # wait before next register
+            if i < TOTAL_ACCOUNTS - 1:
+                wait_time = random.randint(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX)
+                print(f"\nwaiting {wait_time}s before next register...")
+                time.sleep(wait_time)
+
+    else:
+        # ========== 并发模式 ==========
+        print(f"🚀 并发模式启动，同时运行 {concurrent} 个浏览器\n")
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=concurrent) as executor:
+            futures = {}
+            for i in range(TOTAL_ACCOUNTS):
+                worker_id = (i % concurrent) + 1
+                future = executor.submit(_run_one_task, i + 1, TOTAL_ACCOUNTS, worker_id)
+                futures[future] = i + 1
+
+                # 每提交 concurrent 个任务后，等一小段间隔再提交下一批
+                # 避免同时启动太多浏览器
+                if (i + 1) % concurrent == 0 and (i + 1) < TOTAL_ACCOUNTS:
+                    # 等待当前这一批完成
+                    for done_future in as_completed(list(futures.keys())[:concurrent]):
+                        task_id, email, password, success = done_future.result()
+                        completed += 1
+                        if success:
+                            success_count += 1
+                            registered_accounts.append((email, password))
+                        else:
+                            fail_count += 1
+
+                        print(f"\n📊 progress: {completed}/{TOTAL_ACCOUNTS} | success: {success_count} | failed: {fail_count}")
+                        del futures[done_future]
+
+                    # 批次间等待
+                    wait_time = random.randint(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX)
+                    print(f"\n⏳ 批次间等待 {wait_time}s...")
+                    time.sleep(wait_time)
+
+            # 等待剩余的任务完成
+            for done_future in as_completed(futures):
+                task_id, email, password, success = done_future.result()
+                completed += 1
+                if success:
+                    success_count += 1
+                    registered_accounts.append((email, password))
+                else:
+                    fail_count += 1
+
+                print(f"\n📊 progress: {completed}/{TOTAL_ACCOUNTS} | success: {success_count} | failed: {fail_count}")
+
+    # final stats
     print("\n" + "=" * 60)
-    print("🏁 批量注册完成")
+    print("batch register done")
     print("=" * 60)
-    print(f"   总计: {TOTAL_ACCOUNTS}")
-    print(f"   ✅ 成功: {success_count}")
-    print(f"   ❌ 失败: {fail_count}")
-    
+    print(f"   total: {TOTAL_ACCOUNTS}")
+    print(f"   success: {success_count}")
+    print(f"   failed: {fail_count}")
+
     if registered_accounts:
-        print("\n📋 成功注册的账号:")
+        print("\nregistered accounts:")
         for email, password in registered_accounts:
             print(f"   - {email}")
-    
+
     print("=" * 60)
 
 

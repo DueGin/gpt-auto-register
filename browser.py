@@ -4,6 +4,11 @@
 """
 
 import time
+import os
+import re
+import subprocess
+import threading
+from typing import Optional
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -16,7 +21,8 @@ from config import (
     SHORT_WAIT_TIME,
     ERROR_PAGE_MAX_RETRIES,
     BUTTON_CLICK_MAX_RETRIES,
-    CREDIT_CARD_INFO
+    CREDIT_CARD_INFO,
+    BROWSER_INCOGNITO
 )
 from utils import generate_user_info, generate_billing_info
 
@@ -42,6 +48,127 @@ class SafeChrome(uc.Chrome):
             pass
 
 
+_CHROME_MAJOR_RE = re.compile(r"(\d+)\.")
+
+
+def _parse_chrome_major(version_str: Optional[str]) -> Optional[int]:
+    if not version_str:
+        return None
+    match = _CHROME_MAJOR_RE.search(str(version_str))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_chrome_major_from_error(message: str) -> Optional[int]:
+    if not message:
+        return None
+    match = re.search(r"Current browser version is (\d+)\.", message)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _run_version_command(command: list[str]) -> Optional[str]:
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    output = (completed.stdout or "").strip()
+    return output or None
+
+
+def _get_windows_chrome_version_from_registry() -> Optional[str]:
+    try:
+        import winreg  # type: ignore
+    except Exception:
+        return None
+
+    candidates = [
+        (winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon", "version"),
+        (winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon", "pv"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Google\Chrome\BLBeacon", "version"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Google\Chrome\BLBeacon", "pv"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Google\Chrome\BLBeacon", "version"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Google\Chrome\BLBeacon", "pv"),
+    ]
+
+    for root, path, name in candidates:
+        try:
+            with winreg.OpenKey(root, path) as key:
+                value, _ = winreg.QueryValueEx(key, name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        except OSError:
+            continue
+        except Exception:
+            continue
+
+    return None
+
+
+def _detect_local_chrome_major_version() -> Optional[int]:
+    env_value = os.environ.get("CHROME_VERSION_MAIN") or os.environ.get("UC_VERSION_MAIN")
+    if env_value:
+        try:
+            return int(str(env_value).strip())
+        except ValueError:
+            pass
+
+    if os.name == "nt":
+        major = _parse_chrome_major(_get_windows_chrome_version_from_registry())
+        if major:
+            return major
+
+    for cmd in (
+        ["google-chrome", "--version"],
+        ["google-chrome-stable", "--version"],
+        ["chromium", "--version"],
+        ["chromium-browser", "--version"],
+        ["chrome", "--version"],
+        ["chrome.exe", "--version"],
+    ):
+        major = _parse_chrome_major(_run_version_command(cmd))
+        if major:
+            return major
+
+    return None
+
+
+def _create_uc_driver(
+    options: uc.ChromeOptions,
+    real_headless: bool,
+    version_main: Optional[int],
+) -> uc.Chrome:
+    kwargs = {
+        "options": options,
+        "use_subprocess": True,
+        "headless": real_headless,
+        "patcher_force_close": False,
+    }
+    if version_main is not None:
+        kwargs["version_main"] = int(version_main)
+    return SafeChrome(**kwargs)
+
+
+# ChromeDriver 初始化锁 — undetected_chromedriver 下载/拷贝驱动文件不是线程安全的
+# 多线程并发 create_driver 时需要排队，避免文件操作冲突
+_driver_init_lock = threading.Lock()
+
+
 def create_driver(headless=False):
     """
     创建 undetected Chrome 浏览器驱动
@@ -53,27 +180,49 @@ def create_driver(headless=False):
         uc.Chrome: 浏览器驱动实例
     """
     print(f"🌐 正在初始化浏览器 (Headless: {headless})...")
-    options = uc.ChromeOptions()
-    
+
     # === 伪无头模式 (Fake Headless) ===
     # 真正的 Headless 很难过 Cloudflare，我们使用"移出屏幕"的策略
     # 这样既拥有完整的浏览器指纹，用户又看不到窗口
     real_headless = False
-    
+
     if headless:
         print("  👻 使用'伪无头'模式 (Off-screen) 以绕过检测...")
-        options.add_argument("--window-position=-10000,-10000")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--start-maximized") # 可能会覆盖 position，但在多屏下通常有效
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        
-        # 仍然可以加一些伪装，虽然不是必需的，因为已经是真浏览器了
-        options.add_argument("--lang=zh-CN,zh;q=0.9,en;q=0.8")
-    
+
     # 使用自定义的 SafeChrome (注意: 传入 real_headless=False)
-    driver = SafeChrome(options=options, use_subprocess=True, headless=real_headless)
+    version_main = _detect_local_chrome_major_version()
+    if version_main:
+        print(f"[INFO] 检测到本机 Chrome 主版本: {version_main}")
+    else:
+        print("[WARN] 未检测到本机 Chrome 版本，将尝试自动选择驱动（可用 CHROME_VERSION_MAIN 覆盖）")
+
+    def _make_options():
+        """创建新的 ChromeOptions（undetected_chromedriver 不允许复用 options 对象）"""
+        opts = uc.ChromeOptions()
+        if BROWSER_INCOGNITO:
+            opts.add_argument("--incognito")
+        if headless:
+            opts.add_argument("--window-position=-10000,-10000")
+            opts.add_argument("--window-size=1920,1080")
+            opts.add_argument("--start-maximized")
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-gpu")
+            opts.add_argument("--lang=zh-CN,zh;q=0.9,en;q=0.8")
+        return opts
+
+    # 加锁：undetected_chromedriver 下载/拷贝驱动文件不是线程安全的
+    # 多线程并发时需要排队创建 driver，避免文件冲突
+    with _driver_init_lock:
+        try:
+            driver = _create_uc_driver(options=_make_options(), real_headless=real_headless, version_main=version_main)
+        except Exception as e:
+            fallback_major = _extract_chrome_major_from_error(str(e))
+            if fallback_major and fallback_major != version_main:
+                print(f"[WARN] ChromeDriver 版本与本机 Chrome 不匹配，重试 version_main={fallback_major} ...")
+                driver = _create_uc_driver(options=_make_options(), real_headless=real_headless, version_main=fallback_major)
+            else:
+                raise
     
     # === 深度伪装 (针对 Headless 模式) ===
     if headless:
@@ -1670,27 +1819,32 @@ def subscribe_plus_trial(driver):
                                         el.send_keys(Keys.ENTER)
                             except: pass
 
-                        # 检查邮编 - 暂时禁用
-                        # time.sleep(0.8)  # 等待页面响应
-                        # zip_inputs = driver.find_elements(By.CSS_SELECTOR, '#Field-postalCodeInput, input[name="postalCode"]')
-                        # for el in zip_inputs:
-                        #     try:
-                        #         if el.is_displayed():
-                        #             current_value = el.get_attribute('value') or ""
-                        #             # 只有在字段为空或者值不正确时才补填
-                        #             expected_zip = billing_info.get('zip', '10001')
-                        #             if not current_value or current_value != expected_zip:
-                        #                 print(f"    -> 补填 Zip ({expected_zip})")
-                        #                 # 多步骤清空，确保彻底移除已有内容
-                        #                 el.send_keys(Keys.CONTROL + "a")  # 全选
-                        #                 time.sleep(0.1)
-                        #                 el.send_keys(Keys.DELETE)  # 删除
-                        #                 time.sleep(0.1)
-                        #                 el.clear()  # 再清一遍
-                        #                 time.sleep(0.2)
-                        #                 type_slowly(el, expected_zip)
-                        #                 time.sleep(0.8)  # 等待邮编填充效果
-                        #     except: pass
+                        # Check ZIP/postal code: keep existing value, fill when empty.
+                        time.sleep(0.8)  # wait for page response
+                        zip_inputs = driver.find_elements(
+                            By.CSS_SELECTOR,
+                            '#Field-postalCodeInput, input[name="postalCode"], input[autocomplete="postal-code"]'
+                        )
+                        for el in zip_inputs:
+                            try:
+                                if el.is_displayed():
+                                    current_value = (el.get_attribute('value') or '').strip()
+                                    if current_value:
+                                        print(f"    -> Zip already set ({current_value})")
+                                        continue
+                                    expected_zip = billing_info.get('zip', '10001')
+                                    print(f"    -> Fill Zip ({expected_zip})")
+                                    # Multi-step clear to remove autofill
+                                    el.send_keys(Keys.CONTROL + "a")
+                                    time.sleep(0.1)
+                                    el.send_keys(Keys.DELETE)
+                                    time.sleep(0.1)
+                                    el.clear()
+                                    time.sleep(0.2)
+                                    type_slowly(el, expected_zip)
+                                    time.sleep(0.8)  # wait for zip fill effect
+                            except:
+                                pass
                         
                         # 检查城市
                         time.sleep(0.8)  # 等待页面响应

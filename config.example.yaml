@@ -32,6 +32,7 @@ email:
 
 # 浏览器自动化配置
 browser:
+  incognito: false    # incognito mode
   max_wait_time: 600    # 全局最大等待时间
   short_wait_time: 120  # 短任务等待时间
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

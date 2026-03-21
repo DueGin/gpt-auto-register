@@ -15,6 +15,21 @@
 
 import os
 import sys
+
+
+def _configure_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            encoding = stream.encoding or "utf-8"
+            stream.reconfigure(encoding=encoding, errors="replace")
+        except Exception:
+            pass
+
+
+_configure_stdio()
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
@@ -41,8 +56,25 @@ class RegistrationConfig:
 
 
 @dataclass
+class Email2925Account:
+    """单个 2925 邮箱账号"""
+    email: str = ""
+    password: str = ""
+
+
+@dataclass
 class EmailConfig:
     """邮箱服务配置"""
+    provider: str = "cloudflare"        # "2925" 或 "cloudflare"
+    # 2925 多邮箱轮询账号列表
+    accounts: list = field(default_factory=list)  # List[Email2925Account]
+    # 2925 单邮箱配置（兼容旧配置，accounts 优先）
+    master_email: str = ""              # 主邮箱地址，如 12345@2925.com
+    master_password: str = ""           # 主邮箱密码（IMAP 登录用）
+    suffix_length: int = 8             # 子邮箱随机后缀长度
+    imap_host: str = "imap.2925.com"
+    imap_port: int = 993
+    # Cloudflare 临时邮箱配置
     worker_url: str = ""
     domain: str = ""
     prefix_length: int = 10
@@ -71,6 +103,7 @@ class BrowserConfig:
     max_wait_time: int = 600
     short_wait_time: int = 120
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    incognito: bool = False
 
 
 @dataclass
@@ -94,6 +127,7 @@ class BatchConfig:
     """批量注册配置"""
     interval_min: int = 5
     interval_max: int = 15
+    concurrent: int = 1    # 并发浏览器数量，默认 1（串行）
 
 
 @dataclass
@@ -261,7 +295,23 @@ class ConfigLoader:
         # 邮箱配置
         if 'email' in self.raw_config:
             email = self.raw_config['email']
+            # 解析多邮箱账号列表
+            accounts_raw = email.get('accounts', []) or []
+            accounts = []
+            for acc in accounts_raw:
+                if isinstance(acc, dict) and acc.get('email'):
+                    accounts.append(Email2925Account(
+                        email=acc.get('email', ''),
+                        password=acc.get('password', '')
+                    ))
             self.config.email = EmailConfig(
+                provider=email.get('provider', 'cloudflare'),
+                accounts=accounts,
+                master_email=email.get('master_email', ''),
+                master_password=email.get('master_password', ''),
+                suffix_length=email.get('suffix_length', 8),
+                imap_host=email.get('imap_host', 'imap.2925.com'),
+                imap_port=email.get('imap_port', 993),
                 worker_url=email.get('worker_url', ''),
                 domain=email.get('domain', ''),
                 prefix_length=email.get('prefix_length', 10),
@@ -291,7 +341,8 @@ class ConfigLoader:
             self.config.browser = BrowserConfig(
                 max_wait_time=browser.get('max_wait_time', 600),
                 short_wait_time=browser.get('short_wait_time', 120),
-                user_agent=browser.get('user_agent', '')
+                user_agent=browser.get('user_agent', ''),
+                incognito=browser.get('incognito', False)
             )
         
         # 密码配置
@@ -317,7 +368,8 @@ class ConfigLoader:
             batch = self.raw_config['batch']
             self.config.batch = BatchConfig(
                 interval_min=batch.get('interval_min', 5),
-                interval_max=batch.get('interval_max', 15)
+                interval_max=batch.get('interval_max', 15),
+                concurrent=batch.get('concurrent', 1)
             )
         
         # 文件配置
@@ -422,6 +474,13 @@ MIN_AGE = cfg.registration.min_age
 MAX_AGE = cfg.registration.max_age
 
 # 邮箱配置
+EMAIL_PROVIDER = cfg.email.provider
+EMAIL_2925_ACCOUNTS = cfg.email.accounts  # 多邮箱轮询账号列表
+EMAIL_MASTER_EMAIL = cfg.email.master_email
+EMAIL_MASTER_PASSWORD = cfg.email.master_password
+EMAIL_SUFFIX_LENGTH = cfg.email.suffix_length
+EMAIL_2925_IMAP_HOST = cfg.email.imap_host
+EMAIL_2925_IMAP_PORT = cfg.email.imap_port
 EMAIL_WORKER_URL = cfg.email.worker_url
 EMAIL_DOMAIN = cfg.email.domain
 EMAIL_PREFIX_LENGTH = cfg.email.prefix_length
@@ -444,6 +503,7 @@ QQ_MAILBOX = cfg.qq_email.mailbox
 MAX_WAIT_TIME = cfg.browser.max_wait_time
 SHORT_WAIT_TIME = cfg.browser.short_wait_time
 USER_AGENT = cfg.browser.user_agent
+BROWSER_INCOGNITO = cfg.browser.incognito
 
 # 密码配置
 PASSWORD_LENGTH = cfg.password.length
@@ -458,6 +518,7 @@ BUTTON_CLICK_MAX_RETRIES = cfg.retry.button_click_max_retries
 # 批量配置
 BATCH_INTERVAL_MIN = cfg.batch.interval_min
 BATCH_INTERVAL_MAX = cfg.batch.interval_max
+BATCH_CONCURRENT = cfg.batch.concurrent
 
 # 文件配置
 TXT_FILE = cfg.files.accounts_file

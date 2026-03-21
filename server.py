@@ -6,6 +6,7 @@ import builtins
 import os
 import random
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, request, send_from_directory
 
 # 导入业务逻辑
@@ -78,68 +79,132 @@ feishu_bitable.print = hooked_print
 # ==========================================
 # 🧵 后台工作线程
 # ==========================================
+
+def _register_one_with_monitor(task_id, total, worker_id):
+    """
+    并发注册单个账号（带截图监控回调）
+    在线程池中运行，线程安全
+    """
+    def monitor(driver, step):
+        # 1. 检查是否请求停止
+        if state.stop_requested:
+            main.print(f"[W{worker_id}] 🛑 检测到停止请求，正在中断任务...")
+            raise InterruptedError("用户请求停止")
+
+        # 2. 截图更新流 (MJPEG) — 多个 worker 共用一个帧缓冲，最新截的覆盖
+        try:
+            png_bytes = driver.get_screenshot_as_png()
+            state.update_frame(png_bytes)
+        except Exception as e:
+            main.print(f"[W{worker_id}] ⚠️ 截图流更新失败: {e}")
+
+    try:
+        email, password, success = main.register_one_account(
+            monitor_callback=monitor, worker_id=worker_id
+        )
+        return task_id, email, password, success
+    except InterruptedError:
+        main.print(f"[W{worker_id}] 🛑 任务已中断")
+        return task_id, None, None, False
+    except Exception as e:
+        main.print(f"[W{worker_id}] ❌ 异常: {str(e)}")
+        return task_id, None, None, False
+
+
 def worker_thread(count):
+    concurrent = max(1, cfg.batch.concurrent)
     state.is_running = True
     state.stop_requested = False
     state.success_count = 0
     state.fail_count = 0
-    state.current_action = f"🚀 任务启动，目标: {count}"
-    
+    state.current_action = f"🚀 任务启动，目标: {count}，并发: {concurrent}"
+
     # 清空上一轮的画面，避免显示残留
     state.update_frame(None)
-    
-    main.print(f"🚀 开始批量任务，计划注册: {count} 个")
-    
-    try:
-        def monitor(driver, step):
-            # 1. 检查是否请求停止
-            if state.stop_requested:
-                main.print("🛑 检测到停止请求，正在中断任务...")
-                raise InterruptedError("用户请求停止")
-            
-            # 2. 截图更新流 (MJPEG)
-            try:
-                # 获取 PNG 字节流 (内存操作，极快)
-                png_bytes = driver.get_screenshot_as_png()
-                state.update_frame(png_bytes)
-            except Exception as e:
-                main.print(f"⚠️ 截图流更新失败: {e}")
 
-        for i in range(count):
-            if state.stop_requested:
-                main.print("🛑 用户停止了任务")
-                break
-            
-            state.current_action = f"正在注册 ({i+1}/{count})..."
-            
-            try:
-                # 调用核心逻辑，传入回调
-                email, password, success = main.register_one_account(monitor_callback=monitor)
-                
+    main.print(f"🚀 开始批量任务，计划注册: {count} 个，并发: {concurrent}")
+
+    try:
+        if concurrent <= 1:
+            # ========== 串行模式 ==========
+            for i in range(count):
+                if state.stop_requested:
+                    main.print("🛑 用户停止了任务")
+                    break
+
+                state.current_action = f"正在注册 ({i+1}/{count})..."
+                _, _, _, success = _register_one_with_monitor(i + 1, count, 0)
+
                 if success:
                     state.success_count += 1
                 else:
                     state.fail_count += 1
-            except InterruptedError:
-                main.print("🛑 任务已中断")
-                break
-            except Exception as e:
-                state.fail_count += 1
-                main.print(f"❌ 异常: {str(e)}")
-            
-            # 间隔等待
-            if i < count - 1 and not state.stop_requested:
-                wait_time = random.randint(cfg.batch.interval_min, cfg.batch.interval_max)
-                main.print(f"⏳ 冷却中，等待 {wait_time} 秒...")
-                for _ in range(wait_time):
-                    if state.stop_requested: break
-                    time.sleep(1)
-                    
+
+                # 间隔等待
+                if i < count - 1 and not state.stop_requested:
+                    wait_time = random.randint(cfg.batch.interval_min, cfg.batch.interval_max)
+                    main.print(f"⏳ 冷却中，等待 {wait_time} 秒...")
+                    for _ in range(wait_time):
+                        if state.stop_requested: break
+                        time.sleep(1)
+        else:
+            # ========== 并发模式 ==========
+            main.print(f"🚀 并发模式，同时运行 {concurrent} 个浏览器")
+            completed = 0
+            task_index = 0
+
+            while task_index < count and not state.stop_requested:
+                # 本批次要提交的任务数
+                batch_size = min(concurrent, count - task_index)
+                state.current_action = f"并发注册中 ({task_index+1}-{task_index+batch_size}/{count})..."
+
+                with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                    futures = {}
+                    for j in range(batch_size):
+                        if state.stop_requested:
+                            break
+                        worker_id = j + 1
+                        task_id = task_index + j + 1
+                        future = executor.submit(
+                            _register_one_with_monitor, task_id, count, worker_id
+                        )
+                        futures[future] = task_id
+
+                    # 等待本批次全部完成
+                    for done_future in as_completed(futures):
+                        try:
+                            _, email, password, success = done_future.result()
+                            completed += 1
+                            if success:
+                                state.success_count += 1
+                            else:
+                                state.fail_count += 1
+                        except Exception as e:
+                            completed += 1
+                            state.fail_count += 1
+                            main.print(f"❌ worker 异常: {e}")
+
+                        main.print(
+                            f"📊 进度: {completed}/{count} | "
+                            f"成功: {state.success_count} | 失败: {state.fail_count}"
+                        )
+
+                task_index += batch_size
+
+                # 批次间等待
+                if task_index < count and not state.stop_requested:
+                    wait_time = random.randint(cfg.batch.interval_min, cfg.batch.interval_max)
+                    state.current_action = f"批次冷却中，等待 {wait_time} 秒..."
+                    main.print(f"⏳ 批次冷却中，等待 {wait_time} 秒...")
+                    for _ in range(wait_time):
+                        if state.stop_requested: break
+                        time.sleep(1)
+
     except Exception as e:
         main.print(f"💥 严重错误: {e}")
     finally:
         state.is_running = False
-        state.current_action = "任务已完成"
+        state.current_action = f"任务已完成 (成功: {state.success_count}, 失败: {state.fail_count})"
         main.print("🏁 任务结束")
 
 # ==========================================

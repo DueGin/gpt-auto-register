@@ -307,6 +307,17 @@ xxx@domain.com | password123 | 已取消订阅 | 2026-01-06 09:45:00
 
 项目依赖现已通过 `pyproject.toml` 管理。
 
+## 常见问题
+
+### session not created / ChromeDriver 版本不匹配
+
+如果出现类似报错：
+`This version of ChromeDriver only supports Chrome version XXX; Current browser version is YYY...`
+
+说明 ChromeDriver 与本机 Chrome 主版本不一致。`browser.py` 的 `create_driver()` 会尝试自动检测并重试；如仍失败，可手动指定主版本（例如 138）后重新运行：
+- PowerShell：`$env:CHROME_VERSION_MAIN = "138"`
+- CMD：`set CHROME_VERSION_MAIN=138`
+
 ## 免责声明 (Disclaimer)
 
 

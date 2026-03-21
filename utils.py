@@ -7,6 +7,7 @@ import random
 import string
 import csv
 import os
+import threading
 from pathlib import Path
 import re
 import time
@@ -144,48 +145,54 @@ def generate_random_password(length=None):
     return password
 
 
+# 文件写入锁，保证多线程并发写入安全
+_file_lock = threading.Lock()
+
+
 def save_to_txt(email: str, password: str = None, status="已注册"):
     """
     保存账号信息到 TXT 文件，格式: 邮箱----密码----时间----状态
     如果账号已存在，则更新其信息
+    线程安全：使用文件锁保证并发写入不冲突
     """
-    try:
-        file_path = os.path.join(os.path.dirname(__file__), TXT_FILE)
-        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # 读取现有内容
-        lines = []
-        if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-        
-        # 检查是否已存在，存在则更新
-        found = False
-        new_line_content = f"{email}----{password if password else 'N/A'}----{current_date}----{status}\n"
-        
-        for i, line in enumerate(lines):
-            # 检查邮箱是否在行首，避免匹配到邮箱作为密码或状态的一部分
-            if line.startswith(f"{email}----"):
-                parts = line.strip().split("----")
-                current_password_in_file = parts[1] if len(parts) > 1 else 'N/A'
-                
-                # 如果传入了新密码则用新密码，否则沿用旧密码
-                final_password = password if password else current_password_in_file
-                lines[i] = f"{email}----{final_password}----{current_date}----{status}\n"
-                found = True
-                break
-        
-        if not found:
-            lines.append(new_line_content)
-            
-        # 写回文件
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-            
-        print(f"💾 账号状态已更新: {status}")
-        
-    except Exception as e:
-        print(f"❌ 保存/更新账号信息失败: {e}")
+    with _file_lock:
+        try:
+            file_path = os.path.join(os.path.dirname(__file__), TXT_FILE)
+            current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # 读取现有内容
+            lines = []
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+
+            # 检查是否已存在，存在则更新
+            found = False
+            new_line_content = f"{email}----{password if password else 'N/A'}----{current_date}----{status}\n"
+
+            for i, line in enumerate(lines):
+                # 检查邮箱是否在行首，避免匹配到邮箱作为密码或状态的一部分
+                if line.startswith(f"{email}----"):
+                    parts = line.strip().split("----")
+                    current_password_in_file = parts[1] if len(parts) > 1 else 'N/A'
+
+                    # 如果传入了新密码则用新密码，否则沿用旧密码
+                    final_password = password if password else current_password_in_file
+                    lines[i] = f"{email}----{final_password}----{current_date}----{status}\n"
+                    found = True
+                    break
+
+            if not found:
+                lines.append(new_line_content)
+
+            # 写回文件
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+
+            print(f"💾 账号状态已更新: {status}")
+
+        except Exception as e:
+            print(f"❌ 保存/更新账号信息失败: {e}")
 
 def update_account_status(
     email: str,

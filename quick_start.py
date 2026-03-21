@@ -10,6 +10,22 @@
 
 import sys
 import os
+import subprocess
+
+
+def _configure_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            encoding = stream.encoding or "utf-8"
+            stream.reconfigure(encoding=encoding, errors="replace")
+        except Exception:
+            pass
+
+
+_configure_stdio()
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -19,13 +35,18 @@ from config import cfg
 from pathlib import Path
 import json
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
 def check_addresses():
     """检查地址库"""
     scraper_dir = Path("美国地址爬虫_副本")
+    scraper_dir = PROJECT_ROOT / scraper_dir
     total = 0
     
-    if scraper_dir.exists():
-        for json_file in scraper_dir.glob("basic_addresses_*.json"):
+    for dir_path in [PROJECT_ROOT, scraper_dir]:
+        if not dir_path.exists():
+            continue
+        for json_file in dir_path.glob("basic_addresses_*.json"):
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -46,7 +67,18 @@ def main():
     # 如果指定了爬虫
     if args.scrape:
         print(f"📥 先采集 {args.scrape} 个地址...")
-        os.system(f"python3 start_with_scraper.py --scrape {args.scrape}")
+        subprocess.run(
+            [
+                sys.executable,
+                "start_with_scraper.py",
+                "--scrape",
+                str(args.scrape),
+                "--output-dir",
+                str(PROJECT_ROOT),
+            ],
+            cwd=str(PROJECT_ROOT),
+            check=False,
+        )
         return
     
     # 检查地址库
