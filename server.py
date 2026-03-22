@@ -122,6 +122,17 @@ def worker_thread(count):
     # 清空上一轮的画面，避免显示残留
     state.update_frame(None)
 
+    # 初始化代理切换器
+    proxy_switcher = None
+    if cfg.proxy.enabled:
+        try:
+            from proxy_switcher import ProxySwitcher
+            proxy_switcher = ProxySwitcher(cfg.proxy, print_func=hooked_print)
+            proxy_switcher.print_available_proxies()
+        except Exception as e:
+            main.print(f"⚠️ 代理切换器初始化失败（将不进行代理轮换）: {e}")
+            proxy_switcher = None
+
     main.print(f"🚀 开始批量任务，计划注册: {count} 个，并发: {concurrent}")
 
     try:
@@ -142,6 +153,15 @@ def worker_thread(count):
 
                 # 间隔等待
                 if i < count - 1 and not state.stop_requested:
+                    # 切换代理节点
+                    if proxy_switcher:
+                        try:
+                            new_node = proxy_switcher.rotate()
+                            if new_node:
+                                main.print(f"🔄 已切换代理节点: {new_node}")
+                        except Exception as e:
+                            main.print(f"⚠️ 代理切换失败（继续使用当前节点）: {e}")
+
                     wait_time = random.randint(cfg.batch.interval_min, cfg.batch.interval_max)
                     main.print(f"⏳ 冷却中，等待 {wait_time} 秒...")
                     for _ in range(wait_time):
@@ -193,6 +213,15 @@ def worker_thread(count):
 
                 # 批次间等待
                 if task_index < count and not state.stop_requested:
+                    # 切换代理节点
+                    if proxy_switcher:
+                        try:
+                            new_node = proxy_switcher.rotate()
+                            if new_node:
+                                main.print(f"🔄 已切换代理节点: {new_node}")
+                        except Exception as e:
+                            main.print(f"⚠️ 代理切换失败（继续使用当前节点）: {e}")
+
                     wait_time = random.randint(cfg.batch.interval_min, cfg.batch.interval_max)
                     state.current_action = f"批次冷却中，等待 {wait_time} 秒..."
                     main.print(f"⏳ 批次冷却中，等待 {wait_time} 秒...")
@@ -203,6 +232,8 @@ def worker_thread(count):
     except Exception as e:
         main.print(f"💥 严重错误: {e}")
     finally:
+        if proxy_switcher:
+            proxy_switcher.close()
         state.is_running = False
         state.current_action = f"任务已完成 (成功: {state.success_count}, 失败: {state.fail_count})"
         main.print("🏁 任务结束")

@@ -1,8 +1,9 @@
 """
 邮箱服务模块
-支持两种邮箱方案:
+支持三种邮箱方案:
   1. 2925.com 子邮箱方案（推荐）: 主邮箱生成子邮箱，通过 IMAP 读取验证邮件
   2. Cloudflare 临时邮箱方案: 基于 cloudflare_temp_email 项目
+  3. Gmail 子邮箱方案: 使用 username+随机后缀@domain 别名，通过 IMAP 读取验证邮件
 """
 
 import random
@@ -22,6 +23,9 @@ from config import (
     EMAIL_MASTER_PASSWORD,
     EMAIL_2925_IMAP_HOST,
     EMAIL_2925_IMAP_PORT,
+    GMAIL_ACCOUNTS,
+    GMAIL_IMAP_HOST,
+    GMAIL_IMAP_PORT,
     EMAIL_WORKER_URL,
     EMAIL_DOMAIN,
     EMAIL_PREFIX_LENGTH,
@@ -45,6 +49,12 @@ SUB_EMAIL_SUFFIX_MIN_LENGTH = 6
 SUB_EMAIL_SUFFIX_MAX_LENGTH = 8
 # 2925邮箱方案下，等待验证码邮件的最长时间为180秒（3分钟）
 MAX_2925_VERIFICATION_WAIT_SECONDS = 80
+
+# Gmail 子邮箱后缀长度
+GMAIL_SUB_SUFFIX_MIN_LENGTH = 6
+GMAIL_SUB_SUFFIX_MAX_LENGTH = 8
+# Gmail 方案下，等待验证码邮件的最长时间
+MAX_GMAIL_VERIFICATION_WAIT_SECONDS = 120
 
 
 # ==============================================================
@@ -299,6 +309,239 @@ def wait_for_verification_email_via_2925(target_email: str, timeout: int = None,
 
 
 # ==============================================================
+# Gmail 子邮箱方案
+# ==============================================================
+
+class EmailGmailRoundRobin:
+    """
+    Gmail 多邮箱轮询管理器（线程安全）
+    按顺序轮流使用配置的多个 Gmail 账号，避免单个邮箱被频繁使用
+    支持多线程并发调用
+    """
+
+    def __init__(self):
+        self._index = 0
+        self._lock = threading.Lock()
+        self._accounts = []
+        self._init_accounts()
+
+    def _init_accounts(self):
+        """初始化 Gmail 邮箱账号列表"""
+        if GMAIL_ACCOUNTS:
+            self._accounts = [
+                {"email": acc.email, "app_password": acc.app_password}
+                for acc in GMAIL_ACCOUNTS
+                if acc.email
+            ]
+
+        if self._accounts:
+            print(f"📧 Gmail 邮箱轮询: 已加载 {len(self._accounts)} 个邮箱账号")
+        else:
+            print("⚠️ 未配置任何 Gmail 邮箱账号")
+
+    def next_account(self):
+        """
+        获取下一个 Gmail 邮箱账号（线程安全轮询）
+
+        返回:
+            dict: {"email": ..., "app_password": ...}，无可用账号返回 None
+        """
+        if not self._accounts:
+            return None
+
+        with self._lock:
+            account = self._accounts[self._index % len(self._accounts)]
+            self._index += 1
+        return account
+
+    @property
+    def total(self):
+        return len(self._accounts)
+
+
+# 全局轮询实例
+_gmail_round_robin = EmailGmailRoundRobin()
+
+
+def create_gmail_sub_email():
+    """
+    基于 Gmail 邮箱生成子邮箱（支持多邮箱轮询，线程安全）
+
+    原理: 使用 username+随机后缀@domain 别名格式
+    发往子邮箱的邮件会自动进入主邮箱收件箱
+
+    返回:
+        tuple: (子邮箱地址, account_dict)，失败返回 (None, None)
+        account_dict 包含 {"email": 主邮箱, "app_password": 密码}，供后续 IMAP 读取使用
+    """
+    print("📧 正在生成 Gmail 子邮箱...")
+
+    account = _gmail_round_robin.next_account()
+    if not account:
+        print("❌ 无可用的 Gmail 邮箱账号")
+        return None, None
+
+    master_email = account["email"]
+    print(f"  🔄 轮询使用 Gmail: {master_email} (第 {_gmail_round_robin._index}/{_gmail_round_robin.total} 个)")
+
+    if '@' not in master_email:
+        print(f"❌ 邮箱格式错误: {master_email}")
+        return None, None
+
+    username, domain = master_email.split('@', 1)
+
+    # 生成子邮箱：username+随机字符@domain
+    suffix_length = random.randint(GMAIL_SUB_SUFFIX_MIN_LENGTH, GMAIL_SUB_SUFFIX_MAX_LENGTH)
+    first_char = random.choice(string.ascii_lowercase)
+    remaining = ''.join(random.choices(
+        string.ascii_lowercase + string.digits,
+        k=suffix_length - 1
+    ))
+    suffix = f"{first_char}{remaining}"
+
+    sub_email = f"{username}+{suffix}@{domain}"
+    print(f"✅ Gmail 子邮箱生成成功: {sub_email}")
+
+    # 返回 account 信息，供后续 IMAP 读取使用（线程安全，不再用函数属性）
+    return sub_email, account
+
+
+def _fetch_code_via_gmail_imap(target_email: str, master_email: str = None, app_password: str = None, max_messages: int = 20):
+    """
+    通过 IMAP 从 Gmail 邮箱读取发给指定子邮箱的 OpenAI 验证码
+
+    Gmail IMAP 支持 SEARCH 命令，比 2925 更高效
+
+    参数:
+        target_email: 要匹配的子邮箱地址（收件人）
+        master_email: 登录的主邮箱地址（轮询模式下由调用方传入）
+        app_password: Google 应用专用密码
+        max_messages: 最多检查的邮件数
+
+    返回:
+        str: 验证码，未找到返回 None
+    """
+    if not master_email or not app_password:
+        print("  ❌ 无可用的 Gmail IMAP 登录凭据")
+        return None
+
+    client = None
+    try:
+        client = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT)
+        client.login(master_email, app_password)
+        client.select("INBOX")
+
+        # Gmail 支持 SEARCH：搜索 FROM 包含 openai 的邮件
+        status, data = client.search(None, '(FROM "openai")')
+        if status != 'OK' or not data or not data[0]:
+            # 回退：搜索所有邮件
+            status, data = client.search(None, "ALL")
+            if status != 'OK' or not data or not data[0]:
+                return None
+
+        ids = data[0].split()
+        target_lower = target_email.lower()
+
+        # 从最新邮件开始往前检查
+        for msg_id in reversed(ids[-max_messages:]):
+            try:
+                status, msg_data = client.fetch(msg_id, "(RFC822)")
+                if status != 'OK':
+                    continue
+            except Exception:
+                continue
+
+            for part in msg_data:
+                if isinstance(part, tuple):
+                    raw_bytes = part[1]
+                    parsed = _parse_email_bytes(raw_bytes)
+                    subject = parsed['subject']
+                    sender = parsed['sender']
+                    body = parsed['body']
+
+                    # 获取收件人地址
+                    try:
+                        msg_obj = email.message_from_bytes(raw_bytes, policy=policy.default)
+                        to_header = msg_obj.get('To', '') or ''
+                        cc_header = msg_obj.get('Cc', '') or ''
+                        delivered_to = msg_obj.get('Delivered-To', '') or ''
+                        all_recipients = f"{to_header} {cc_header} {delivered_to}".lower()
+                    except Exception:
+                        all_recipients = ''
+
+                    # 检查是否是发给目标子邮箱的 OpenAI 邮件
+                    sender_lower = sender.lower()
+                    subject_lower = subject.lower()
+                    is_openai_mail = ('openai' in sender_lower) or ('chatgpt' in subject_lower)
+                    is_target = target_lower in all_recipients
+
+                    if is_openai_mail and is_target:
+                        # 尝试从主题提取验证码
+                        code = extract_verification_code(subject)
+                        if code:
+                            return code
+                        # 尝试从正文提取
+                        if body:
+                            code = extract_verification_code(body)
+                            if code:
+                                return code
+    except Exception as e:
+        print(f"  Gmail IMAP 读取错误: {e}")
+    finally:
+        if client:
+            try:
+                client.logout()
+            except Exception:
+                pass
+    return None
+
+
+def wait_for_verification_email_via_gmail(target_email: str, timeout: int = None, master_account: dict = None):
+    """
+    使用 Gmail IMAP 轮询等待发给指定子邮箱的验证码
+
+    参数:
+        target_email: 子邮箱地址
+        timeout: 超时时间（秒）
+        master_account: 主邮箱账号信息 {"email": ..., "app_password": ...}
+
+    返回:
+        str: 验证码，未找到返回 None
+    """
+    if timeout is None:
+        timeout = EMAIL_WAIT_TIMEOUT
+    timeout = min(timeout, MAX_GMAIL_VERIFICATION_WAIT_SECONDS)
+
+    # 使用传入的主邮箱账号
+    if master_account:
+        master_email = master_account["email"]
+        app_password = master_account["app_password"]
+        print(f"⏳ 正在从 Gmail [{master_email}] 等待验证邮件（目标: {target_email}，最长 {timeout} 秒）...")
+    else:
+        print("❌ Gmail 方案需要提供 master_account")
+        return None
+
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        code = _fetch_code_via_gmail_imap(
+            target_email,
+            master_email=master_email,
+            app_password=app_password
+        )
+        if code:
+            print(f"\n📧 从 Gmail 获取到验证码: {code}")
+            return code
+
+        elapsed = int(time.time() - start_time)
+        print(f"  Gmail 邮箱轮询中... ({elapsed}秒)", end='\r')
+        time.sleep(EMAIL_POLL_INTERVAL)
+
+    print("\n⏰ Gmail 邮箱未收到验证码")
+    return None
+
+
+# ==============================================================
 # Cloudflare 临时邮箱方案（旧方案）
 # ==============================================================
 
@@ -312,6 +555,10 @@ def create_temp_email():
     # 如果是 2925 方案，使用子邮箱生成
     if EMAIL_PROVIDER == "2925":
         return create_2925_sub_email()
+
+    # Gmail 方案
+    if EMAIL_PROVIDER == "gmail":
+        return create_gmail_sub_email()
 
     # 以下为 Cloudflare 方案
     print("📧 正在创建临时邮箱...")
@@ -739,6 +986,16 @@ def wait_for_verification_email(jwt_token=None, timeout: int = None, target_emai
         if not account and isinstance(jwt_token, dict):
             account = jwt_token
         return wait_for_verification_email_via_2925(target_email, timeout, master_account=account)
+
+    # Gmail 方案：通过 IMAP 从 Gmail 读取
+    if EMAIL_PROVIDER == "gmail":
+        if not target_email:
+            print("⚠️ Gmail 方案需要提供 target_email 参数")
+            return None
+        account = master_account
+        if not account and isinstance(jwt_token, dict):
+            account = jwt_token
+        return wait_for_verification_email_via_gmail(target_email, timeout, master_account=account)
 
     # Cloudflare 方案：优先使用 QQ 邮箱轮询
     if QQ_EMAIL_ENABLED and QQ_EMAIL_ADDRESS and QQ_EMAIL_AUTH_CODE:

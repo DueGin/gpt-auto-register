@@ -168,6 +168,10 @@ def _create_uc_driver(
 # 多线程并发 create_driver 时需要排队，避免文件操作冲突
 _driver_init_lock = threading.Lock()
 
+# Chrome 版本缓存 — 一次运行期间版本不会变，只需检测一次
+_cached_chrome_version: Optional[int] = None
+_chrome_version_detected: bool = False
+
 
 def create_driver(headless=False):
     """
@@ -190,17 +194,26 @@ def create_driver(headless=False):
         print("  👻 使用'伪无头'模式 (Off-screen) 以绕过检测...")
 
     # 使用自定义的 SafeChrome (注意: 传入 real_headless=False)
-    version_main = _detect_local_chrome_major_version()
-    if version_main:
-        print(f"[INFO] 检测到本机 Chrome 主版本: {version_main}")
-    else:
-        print("[WARN] 未检测到本机 Chrome 版本，将尝试自动选择驱动（可用 CHROME_VERSION_MAIN 覆盖）")
+    # Chrome 版本只在首次检测，后续复用缓存结果
+    global _cached_chrome_version, _chrome_version_detected
+    if not _chrome_version_detected:
+        _cached_chrome_version = _detect_local_chrome_major_version()
+        _chrome_version_detected = True
+        if _cached_chrome_version:
+            print(f"[INFO] 检测到本机 Chrome 主版本: {_cached_chrome_version}")
+        else:
+            print("[WARN] 未检测到本机 Chrome 版本，将尝试自动选择驱动（可用 CHROME_VERSION_MAIN 覆盖）")
+    version_main = _cached_chrome_version
 
     def _make_options():
         """创建新的 ChromeOptions（undetected_chromedriver 不允许复用 options 对象）"""
         opts = uc.ChromeOptions()
         if BROWSER_INCOGNITO:
             opts.add_argument("--incognito")
+        # 禁用后台节流 — 窗口不在前台时 Chrome 也正常执行 JS/定时器/渲染
+        opts.add_argument("--disable-background-timer-throttling")
+        opts.add_argument("--disable-backgrounding-occluded-windows")
+        opts.add_argument("--disable-renderer-backgrounding")
         if headless:
             opts.add_argument("--window-position=-10000,-10000")
             opts.add_argument("--window-size=1920,1080")
@@ -227,12 +240,12 @@ def create_driver(headless=False):
     # === 深度伪装 (针对 Headless 模式) ===
     if headless:
         print("🎭 应用深度指纹伪装...")
-        
+
         # 1. 伪造 WebGL 供应商 (让它看起来像有真实显卡)
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                
+
                 const getParameter = WebGLRenderingContext.prototype.getParameter;
                 WebGLRenderingContext.prototype.getParameter = function(parameter) {
                     // 37445: UNMASKED_VENDOR_WEBGL
@@ -247,7 +260,7 @@ def create_driver(headless=False):
                 };
             """
         })
-        
+
         # 2. 伪造插件列表 (Headless 默认是空的)
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
@@ -259,7 +272,7 @@ def create_driver(headless=False):
                 });
             """
         })
-        
+
         # 3. 绕过常见的检测属性
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
@@ -270,7 +283,7 @@ def create_driver(headless=False):
                     csi: function() {},
                     app: {}
                 };
-                
+
                 // 伪造 permissions
                 const originalQuery = window.navigator.permissions.query;
                 window.navigator.permissions.query = (parameters) => (
@@ -280,6 +293,38 @@ def create_driver(headless=False):
                 );
             """
         })
+
+    # === Page Visibility API 欺骗 ===
+    # 无论是否 headless，都注入此脚本
+    # 当浏览器窗口在后台/最小化/屏幕外时，Chrome 会通过 Page Visibility API
+    # 告知页面 document.hidden=true, visibilityState="hidden"
+    # 很多网站的 JS 会因此暂停定时器、停止动画、甚至阻止交互
+    # 这里欺骗页面让它始终认为自己在前台活跃状态
+    print("👁️ 注入 Page Visibility 前台欺骗...")
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            // 1. 让 document.hidden 始终返回 false
+            Object.defineProperty(document, 'hidden', {
+                get: () => false,
+                configurable: true
+            });
+            // 2. 让 document.visibilityState 始终返回 'visible'
+            Object.defineProperty(document, 'visibilityState', {
+                get: () => 'visible',
+                configurable: true
+            });
+            // 3. 拦截 visibilitychange 事件，不让页面收到"进入后台"通知
+            document.addEventListener('visibilitychange', function(e) {
+                e.stopImmediatePropagation();
+            }, true);
+            // 4. 阻止 focus/blur 事件泄露窗口失焦信息
+            window.addEventListener('blur', function(e) {
+                e.stopImmediatePropagation();
+            }, true);
+            // 5. 让 document.hasFocus() 始终返回 true
+            Document.prototype.hasFocus = function() { return true; };
+        """
+    })
 
     return driver
 

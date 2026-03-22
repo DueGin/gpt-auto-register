@@ -63,6 +63,13 @@ class Email2925Account:
 
 
 @dataclass
+class GmailAccount:
+    """单个 Gmail 邮箱账号"""
+    email: str = ""
+    app_password: str = ""    # Google 应用专用密码
+
+
+@dataclass
 class EmailConfig:
     """邮箱服务配置"""
     provider: str = "cloudflare"        # "2925" 或 "cloudflare"
@@ -74,6 +81,10 @@ class EmailConfig:
     suffix_length: int = 8             # 子邮箱随机后缀长度
     imap_host: str = "imap.2925.com"
     imap_port: int = 993
+    # Gmail 子邮箱配置
+    gmail_accounts: list = field(default_factory=list)  # List[GmailAccount]
+    gmail_imap_host: str = "imap.gmail.com"
+    gmail_imap_port: int = 993
     # Cloudflare 临时邮箱配置
     worker_url: str = ""
     domain: str = ""
@@ -100,6 +111,7 @@ class QQEmailConfig:
 @dataclass
 class BrowserConfig:
     """浏览器配置"""
+    headless: bool = False
     max_wait_time: int = 600
     short_wait_time: int = 120
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -128,6 +140,19 @@ class BatchConfig:
     interval_min: int = 5
     interval_max: int = 15
     concurrent: int = 1    # 并发浏览器数量，默认 1（串行）
+
+
+@dataclass
+class ProxyConfig:
+    """Clash 代理轮换配置"""
+    enabled: bool = False
+    clash_api_url: str = "http://127.0.0.1:9097"
+    clash_secret: str = ""
+    proxy_group: str = "GLOBAL"
+    strategy: str = "random"                    # random / round_robin / low_latency
+    region_whitelist: list = field(default_factory=list)
+    latency_test_url: str = "https://www.gstatic.com/generate_204"
+    latency_test_timeout: int = 5000
 
 
 @dataclass
@@ -203,6 +228,7 @@ class AppConfig:
     password: PasswordConfig = field(default_factory=PasswordConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     payment: PaymentConfig = field(default_factory=PaymentConfig)
     feishu_bitable: FeishuBitableConfig = field(default_factory=FeishuBitableConfig)
@@ -304,6 +330,15 @@ class ConfigLoader:
                         email=acc.get('email', ''),
                         password=acc.get('password', '')
                     ))
+            # 解析 Gmail 多邮箱账号列表
+            gmail_accounts_raw = email.get('gmail_accounts', []) or []
+            gmail_accounts = []
+            for acc in gmail_accounts_raw:
+                if isinstance(acc, dict) and acc.get('email'):
+                    gmail_accounts.append(GmailAccount(
+                        email=acc.get('email', ''),
+                        app_password=acc.get('app_password', '')
+                    ))
             self.config.email = EmailConfig(
                 provider=email.get('provider', 'cloudflare'),
                 accounts=accounts,
@@ -312,6 +347,9 @@ class ConfigLoader:
                 suffix_length=email.get('suffix_length', 8),
                 imap_host=email.get('imap_host', 'imap.2925.com'),
                 imap_port=email.get('imap_port', 993),
+                gmail_accounts=gmail_accounts,
+                gmail_imap_host=email.get('gmail_imap_host', 'imap.gmail.com'),
+                gmail_imap_port=email.get('gmail_imap_port', 993),
                 worker_url=email.get('worker_url', ''),
                 domain=email.get('domain', ''),
                 prefix_length=email.get('prefix_length', 10),
@@ -339,6 +377,7 @@ class ConfigLoader:
         if 'browser' in self.raw_config:
             browser = self.raw_config['browser']
             self.config.browser = BrowserConfig(
+                headless=browser.get('headless', False),
                 max_wait_time=browser.get('max_wait_time', 600),
                 short_wait_time=browser.get('short_wait_time', 120),
                 user_agent=browser.get('user_agent', ''),
@@ -371,7 +410,22 @@ class ConfigLoader:
                 interval_max=batch.get('interval_max', 15),
                 concurrent=batch.get('concurrent', 1)
             )
-        
+
+        # 代理轮换配置
+        if 'proxy' in self.raw_config:
+            proxy = self.raw_config['proxy']
+            whitelist_raw = proxy.get('region_whitelist', []) or []
+            self.config.proxy = ProxyConfig(
+                enabled=proxy.get('enabled', False),
+                clash_api_url=proxy.get('clash_api_url', 'http://127.0.0.1:9097'),
+                clash_secret=proxy.get('clash_secret', ''),
+                proxy_group=proxy.get('proxy_group', 'GLOBAL'),
+                strategy=proxy.get('strategy', 'random'),
+                region_whitelist=whitelist_raw if isinstance(whitelist_raw, list) else [],
+                latency_test_url=proxy.get('latency_test_url', 'https://www.gstatic.com/generate_204'),
+                latency_test_timeout=proxy.get('latency_test_timeout', 5000),
+            )
+
         # 文件配置
         if 'files' in self.raw_config:
             files = self.raw_config['files']
@@ -481,6 +535,10 @@ EMAIL_MASTER_PASSWORD = cfg.email.master_password
 EMAIL_SUFFIX_LENGTH = cfg.email.suffix_length
 EMAIL_2925_IMAP_HOST = cfg.email.imap_host
 EMAIL_2925_IMAP_PORT = cfg.email.imap_port
+# Gmail 配置
+GMAIL_ACCOUNTS = cfg.email.gmail_accounts
+GMAIL_IMAP_HOST = cfg.email.gmail_imap_host
+GMAIL_IMAP_PORT = cfg.email.gmail_imap_port
 EMAIL_WORKER_URL = cfg.email.worker_url
 EMAIL_DOMAIN = cfg.email.domain
 EMAIL_PREFIX_LENGTH = cfg.email.prefix_length
@@ -500,6 +558,8 @@ QQ_POP_PORT = cfg.qq_email.pop_port
 QQ_MAILBOX = cfg.qq_email.mailbox
 
 # 浏览器配置
+# 浏览器配置
+BROWSER_HEADLESS = cfg.browser.headless
 MAX_WAIT_TIME = cfg.browser.max_wait_time
 SHORT_WAIT_TIME = cfg.browser.short_wait_time
 USER_AGENT = cfg.browser.user_agent
@@ -519,6 +579,9 @@ BUTTON_CLICK_MAX_RETRIES = cfg.retry.button_click_max_retries
 BATCH_INTERVAL_MIN = cfg.batch.interval_min
 BATCH_INTERVAL_MAX = cfg.batch.interval_max
 BATCH_CONCURRENT = cfg.batch.concurrent
+
+# 代理轮换配置
+PROXY_ENABLED = cfg.proxy.enabled
 
 # 文件配置
 TXT_FILE = cfg.files.accounts_file

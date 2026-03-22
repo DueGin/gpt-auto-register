@@ -13,7 +13,9 @@ from config import (
     BATCH_INTERVAL_MIN,
     BATCH_INTERVAL_MAX,
     BATCH_CONCURRENT,
-    CREDIT_CARD_INFO
+    CREDIT_CARD_INFO,
+    BROWSER_HEADLESS,
+    cfg
 )
 from utils import generate_random_password, save_to_txt, update_account_status
 from email_service import create_temp_email, wait_for_verification_email
@@ -102,7 +104,7 @@ def register_one_account(monitor_callback=None, account_type: str = "GPT", worke
         password = generate_random_password()
 
         # 3. init browser
-        driver = create_driver(headless=False)
+        driver = create_driver(headless=BROWSER_HEADLESS)
         _report("init_browser")
         _check_timeout("init_browser")
 
@@ -280,6 +282,17 @@ def run_batch():
     """
     concurrent = max(1, BATCH_CONCURRENT)
 
+    # 初始化代理切换器
+    proxy_switcher = None
+    if cfg.proxy.enabled:
+        try:
+            from proxy_switcher import ProxySwitcher
+            proxy_switcher = ProxySwitcher(cfg.proxy)
+            proxy_switcher.print_available_proxies()
+        except Exception as e:
+            print(f"⚠️ 代理切换器初始化失败（将不进行代理轮换）: {e}")
+            proxy_switcher = None
+
     print("\n" + "=" * 60)
     print(f"start batch register, target: {TOTAL_ACCOUNTS}, concurrent: {concurrent}")
     print("=" * 60 + "\n")
@@ -314,6 +327,15 @@ def run_batch():
 
             # wait before next register
             if i < TOTAL_ACCOUNTS - 1:
+                # 切换代理节点
+                if proxy_switcher:
+                    try:
+                        new_node = proxy_switcher.rotate()
+                        if new_node:
+                            print(f"🔄 已切换代理节点: {new_node}")
+                    except Exception as e:
+                        print(f"⚠️ 代理切换失败（继续使用当前节点）: {e}")
+
                 wait_time = random.randint(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX)
                 print(f"\nwaiting {wait_time}s before next register...")
                 time.sleep(wait_time)
@@ -345,6 +367,15 @@ def run_batch():
 
                         print(f"\n📊 progress: {completed}/{TOTAL_ACCOUNTS} | success: {success_count} | failed: {fail_count}")
                         del futures[done_future]
+
+                    # 切换代理节点
+                    if proxy_switcher:
+                        try:
+                            new_node = proxy_switcher.rotate()
+                            if new_node:
+                                print(f"🔄 已切换代理节点: {new_node}")
+                        except Exception as e:
+                            print(f"⚠️ 代理切换失败（继续使用当前节点）: {e}")
 
                     # 批次间等待
                     wait_time = random.randint(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX)

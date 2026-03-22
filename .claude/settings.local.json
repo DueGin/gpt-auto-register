@@ -6,7 +6,15 @@
       "Bash(hexdump -C \"/Users/uq/Downloads/gpt-auto-register \\(2\\)/main.py\")",
       "Bash(/usr/bin/python3 -c \"import py_compile; py_compile.compile\\(''/Users/uq/Downloads/gpt-auto-register \\(2\\)/main.py'', doraise=True\\); print\\(''syntax OK''\\)\")",
       "Bash(python -c \":*)",
-      "Bash(python3 -c \":*)"
+      "Bash(python3 -c \":*)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''config.py'', doraise=True\\); py_compile.compile\\(''main.py'', doraise=True\\); py_compile.compile\\(''server.py'', doraise=True\\); py_compile.compile\\(''proxy_switcher.py'', doraise=True\\); print\\(''All files OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''config.py'', doraise=True\\); print\\(''config.py OK''\\); py_compile.compile\\(''email_service.py'', doraise=True\\); print\\(''email_service.py OK''\\)\")",
+      "Bash(python -c \"from config import GMAIL_ACCOUNTS, GMAIL_IMAP_HOST, GMAIL_IMAP_PORT, EMAIL_PROVIDER; print\\(f''Provider: {EMAIL_PROVIDER}''\\); print\\(f''Gmail accounts: {len\\(GMAIL_ACCOUNTS\\)}''\\); print\\(f''IMAP host: {GMAIL_IMAP_HOST}:{GMAIL_IMAP_PORT}''\\); [print\\(f''  - {acc.email}''\\) for acc in GMAIL_ACCOUNTS]\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''browser.py'', doraise=True\\); print\\(''browser.py OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''config.py'', doraise=True\\); print\\(''config.py OK''\\); py_compile.compile\\(''browser.py'', doraise=True\\); print\\(''browser.py OK''\\); py_compile.compile\\(''main.py'', doraise=True\\); print\\(''main.py OK''\\)\")",
+      "Bash(python -c \"from config import BROWSER_HEADLESS; print\\(f''BROWSER_HEADLESS = {BROWSER_HEADLESS}''\\)\")",
+      "Bash(python proxy_switcher.py --current)",
+      "Bash(python proxy_switcher.py --rotate)"
     ]
   }
 }
